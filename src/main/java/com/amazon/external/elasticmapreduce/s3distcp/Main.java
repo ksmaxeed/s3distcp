@@ -11,7 +11,7 @@ public class Main {
   public static void main(String[] args) throws Exception {
     log.info("Running with args: " + Arrays.toString(args));
 
-	System.exit(ToolRunner.run(new S3DistCp(), args));
+    System.exit(ToolRunner.run(new S3DistCp(), args));
   }
 }
 

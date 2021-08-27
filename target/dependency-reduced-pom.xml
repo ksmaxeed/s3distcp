@@ -4,7 +4,7 @@
   <groupId>com.amazon</groupId>
   <artifactId>s3distcp</artifactId>
   <name>s3distcp</name>
-  <version>TRUNK-SNAPSHOT</version>
+  <version>1.0</version>
   <description>A fast copy utility to/from S3 and HDFS</description>
   <build>
     <resources>
