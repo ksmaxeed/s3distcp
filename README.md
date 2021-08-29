@@ -5,8 +5,7 @@ s3distcp
 
 I forked from original repository, and I added two new options. It is to be specified together with the GroupBy option.
 
-1. The option to insert a new line when merging files.
-
+1. The option to insert a new line when merging files.  
 2. The option to remove the directory char "/" from the file path where the merged files will be saved.
 
 The options useful the specific case.
@@ -85,3 +84,8 @@ the destination folder contents is like this,
 #### Information
 
 If you use the MacOS and download the gz files which made with these options, may be it's cannot uncompress file. But it's not the broken gz file. In this case please use gunzip command in the terminal.
+
+--------
+
+reference:  
+https://stackoverflow.com/questions/31393706/how-to-get-s3distcp-to-merge-with-newlines
