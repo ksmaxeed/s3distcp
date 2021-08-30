@@ -85,7 +85,4 @@ the destination folder contents is like this,
 
 If you use the MacOS and download the gz files which made with these options, may be it's cannot uncompress file. But it's not the broken gz file. In this case please use gunzip command in the terminal.
 
---------
 
-reference:  
-https://stackoverflow.com/questions/31393706/how-to-get-s3distcp-to-merge-with-newlines
