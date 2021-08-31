@@ -1,23 +1,8 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.auth.InstanceProfileCredentialsProvider;
-import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.model.ListObjectsRequest;
-import com.amazonaws.services.s3.model.ObjectListing;
-import com.amazonaws.services.s3.model.S3ObjectSummary;
-import com.google.gson.Gson;
-import emr.hbase.options.OptionWithArg;
-import emr.hbase.options.Options;
-import emr.hbase.options.SimpleOption;
 import java.io.File;
 import java.io.IOException;
-import java.io.PrintStream;
-import java.net.InetAddress;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.Queue;
@@ -26,11 +11,7 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpConnectionManager;
-import org.apache.commons.httpclient.SimpleHttpConnectionManager;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.params.HttpConnectionManagerParams;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -40,8 +21,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.Counters;
-import org.apache.hadoop.mapred.Counters.Counter;
-import org.apache.hadoop.mapred.Counters.Group;
 import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapred.FileOutputFormat;
 import org.apache.hadoop.mapred.JobClient;
@@ -51,22 +30,33 @@ import org.apache.hadoop.mapred.SequenceFileInputFormat;
 import org.apache.hadoop.mapred.TextOutputFormat;
 import org.apache.hadoop.util.Tool;
 
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.auth.InstanceProfileCredentialsProvider;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.model.ListObjectsRequest;
+import com.amazonaws.services.s3.model.ObjectListing;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
+import com.google.gson.Gson;
+
+import emr.hbase.options.OptionWithArg;
+import emr.hbase.options.Options;
+import emr.hbase.options.SimpleOption;
+
 public class S3DistCp implements Tool {
   private static final Log LOG = LogFactory.getLog(S3DistCp.class);
-  private static final int MAX_LIST_RETRIES = 10;
-  public static final String EC2_META_AZ_URL = "http://169.254.169.254/latest/meta-data/placement/availability-zone";
   public static final String S3_ENDPOINT_PDT = "s3-us-gov-west-1.amazonaws.com";
   private static String ec2MetaDataAz = null;
   private Configuration conf;
 
   public void createInputFileList(Configuration conf, Path srcPath, FileInfoListing fileInfoListing) {
     URI srcUri = srcPath.toUri();
-    if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n")))
+    if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n"))) {
       createInputFileListS3(conf, srcUri, fileInfoListing);
-    else
+    } else {
       try {
         FileSystem fs = srcPath.getFileSystem(conf);
-        Queue pathsToVisit = new ArrayDeque();
+        Queue<Path> pathsToVisit = new ArrayDeque<>();
         pathsToVisit.add(srcPath);
         while (pathsToVisit.size() > 0) {
           Path curPath = (Path) pathsToVisit.remove();
@@ -81,6 +71,7 @@ public class S3DistCp implements Tool {
         LOG.fatal("Failed to list input files", e);
         System.exit(-4);
       }
+    }
   }
 
   public void createInputFileListS3(Configuration conf, URI srcUri, FileInfoListing fileInfoListing) {
@@ -139,7 +130,7 @@ public class S3DistCp implements Tool {
     }
     String endpoint = conf.get("fs.s3n.endpoint");
     if ((endpoint == null) && (Utils.isGovCloud(ec2MetaDataAz))) {
-      endpoint = "s3-us-gov-west-1.amazonaws.com";
+      endpoint = S3_ENDPOINT_PDT;
     }
     if (endpoint != null) {
       LOG.info("AmazonS3Client setEndpoint " + endpoint);
@@ -205,7 +196,7 @@ public class S3DistCp implements Tool {
     }
 
     try {
-      Map previousManifest = null;
+      Map<String, ManifestEntry> previousManifest = null;
       if (!options.copyFromManifest.booleanValue()) {
         previousManifest = options.getPreviousManifest();
       }
@@ -248,7 +239,7 @@ public class S3DistCp implements Tool {
     if (options.getS3Endpoint() != null)
       job.set("fs.s3n.endpoint", options.getS3Endpoint());
     else if (Utils.isGovCloud(ec2MetaDataAz)) {
-      job.set("fs.s3n.endpoint", "s3-us-gov-west-1.amazonaws.com");
+      job.set("fs.s3n.endpoint", S3_ENDPOINT_PDT);
     }
 
     job.setBoolean("s3DistCp.copyFiles.useMultipartUploads", !options.getDisableMultipartUpload().booleanValue());
@@ -256,7 +247,7 @@ public class S3DistCp implements Tool {
       Integer partSize = options.getMultipartUploadPartSize();
       job.setInt("s3DistCp.copyFiles.multipartUploadPartSize", partSize.intValue() * 1024 * 1024);
     }
-    
+
     job.setBoolean("s3DistCp.groupWithNewLine", options.getGroupWithNewLine());
     job.setInt("s3DistCp.numberDeletePartition", options.getNumberDeletePartition());
 
@@ -479,15 +470,19 @@ public class S3DistCp implements Tool {
 
     public static Map<String, ManifestEntry> loadManifest(Path manifestPath, Configuration config) {
       Gson gson = new Gson();
-      Map manifest = null;
+      Map<String, ManifestEntry> manifest = null;
       FSDataInputStream inStream = null;
       try {
-        manifest = new TreeMap();
+        
+        manifest = new TreeMap<>();
+        
         FileSystem fs = FileSystem.get(manifestPath.toUri(), config);
         inStream = fs.open(manifestPath);
         GZIPInputStream gzipStream = new GZIPInputStream(inStream);
         Scanner scanner = new Scanner(gzipStream);
-        manifest = new TreeMap();
+        
+        manifest = new TreeMap<>();
+        
         while (scanner.hasNextLine()) {
           String line = scanner.nextLine();
           ManifestEntry entry = (ManifestEntry) gson.fromJson(line, ManifestEntry.class);

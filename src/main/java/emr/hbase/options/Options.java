@@ -1,8 +1,8 @@
 package emr.hbase.options;
 
-import com.google.common.collect.Lists;
-import java.io.PrintStream;
 import java.util.List;
+
+import com.google.common.collect.Lists;
 
 public class Options {
   List<Option> options = Lists.newArrayList();

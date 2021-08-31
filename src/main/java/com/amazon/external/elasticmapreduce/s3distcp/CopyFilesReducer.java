@@ -1,6 +1,5 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
-import com.google.common.collect.Lists;
 //import com.hadoop.compression.lzo.LzopCodec;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,11 +12,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.compress.SnappyCodec;
 import org.apache.hadoop.mapred.JobConf;
@@ -25,6 +24,8 @@ import org.apache.hadoop.mapred.OutputCollector;
 import org.apache.hadoop.mapred.Reducer;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.util.Progressable;
+
+import com.google.common.collect.Lists;
 
 public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
   private static final Log LOG = LogFactory.getLog(CopyFilesReducer.class);
@@ -93,7 +94,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
     this.numberFiles = conf.getBoolean("s3DistCp.copyfiles.reducer.numberFiles", false);
     this.transferQueue = new SimpleExecutor(queueSize, numWorkers);
     this.multipartSize = conf.getInt("s3DistCp.copyFiles.multipartUploadPartSize", 16777216);
-    this.uncommitedFiles = new HashSet();
+    this.uncommitedFiles = new HashSet<>();
     this.deleteOnSuccess = conf.getBoolean("s3DistCp.copyFiles.deleteFilesOnSuccess", false);
     this.numTransferRetries = conf.getInt("s3DistCp.copyfiles.mapper.numRetries", 10);
     this.useMultipartUpload = conf.getBoolean("s3DistCp.copyFiles.useMultipartUploads", true);
@@ -159,9 +160,9 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
     long curSize = 0L;
     int groupNum = 0;
     int numFiles = 0;
-    List curFiles = new ArrayList();
+    List<FileInfo> curFiles = new ArrayList<>();
     while (fileInfos.hasNext()) {
-      FileInfo fileInfo = ((FileInfo) fileInfos.next()).clone();
+      FileInfo fileInfo = ((FileInfo) fileInfos.next());//.clone();
       numFiles++;
       curSize += fileInfo.fileSize.get();
       curFiles.add(fileInfo);
@@ -178,7 +179,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
         LOG.info("tempPath:" + tempPath + " finalPath:" + finalPath);
         executeDownloads(this, curFiles, tempPath, finalPath);
         groupNum++;
-        curFiles = new ArrayList();
+        curFiles = new ArrayList<>();
         curSize = 0L;
       }
     }
