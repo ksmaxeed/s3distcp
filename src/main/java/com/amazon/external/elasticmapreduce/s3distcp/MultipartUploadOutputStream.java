@@ -1,16 +1,5 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
-//import amazon.emr.metrics.MetricsSaver;
-//import amazon.emr.metrics.MetricsSaver.StopWatch;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.AbortMultipartUploadRequest;
-import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadRequest;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadResult;
-import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.model.PartETag;
-import com.amazonaws.services.s3.model.UploadPartRequest;
-import com.amazonaws.services.s3.model.UploadPartResult;
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -29,6 +18,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -37,6 +27,18 @@ import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.io.retry.RetryProxy;
 import org.apache.hadoop.util.Progressable;
+
+//import amazon.emr.metrics.MetricsSaver;
+//import amazon.emr.metrics.MetricsSaver.StopWatch;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.AbortMultipartUploadRequest;
+import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
+import com.amazonaws.services.s3.model.InitiateMultipartUploadRequest;
+import com.amazonaws.services.s3.model.InitiateMultipartUploadResult;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PartETag;
+import com.amazonaws.services.s3.model.UploadPartRequest;
+import com.amazonaws.services.s3.model.UploadPartResult;
 
 public class MultipartUploadOutputStream extends OutputStream implements Abortable {
   public static final Log LOG = LogFactory.getLog("org.apache.hadoop.fs.s3native.MultipartUploadOutputStream");
@@ -57,13 +59,13 @@ public class MultipartUploadOutputStream extends OutputStream implements Abortab
   public MultipartUploadOutputStream(AmazonS3 s3, ThreadPoolExecutor threadPool, Progressable progressable,
       String bucketName, String key, ObjectMetadata metadata, long partSize, File[] tempDirs) {
     RetryPolicy basePolicy = RetryPolicies.retryUpToMaximumCountWithFixedSleep(4, 10L, TimeUnit.SECONDS);
-    Map exceptionToPolicyMap = new HashMap();
+    Map<Class<? extends Exception>, RetryPolicy> exceptionToPolicyMap = new HashMap<>();
 
     exceptionToPolicyMap.put(Exception.class, basePolicy);
 
     RetryPolicy methodPolicy = RetryPolicies.retryByException(RetryPolicies.TRY_ONCE_THEN_FAIL, exceptionToPolicyMap);
 
-    Map methodNameToPolicyMap = new HashMap();
+    Map<String, RetryPolicy> methodNameToPolicyMap = new HashMap<>();
 
     methodNameToPolicyMap.put("completeMultipartUpload", methodPolicy);
 
@@ -73,7 +75,7 @@ public class MultipartUploadOutputStream extends OutputStream implements Abortab
 
     this.threadPool = threadPool;
     this.progressable = progressable;
-    this.futures = new ArrayList();
+    this.futures = new ArrayList<>();
 
     this.tempDirs = tempDirs;
     this.bucketName = bucketName;
@@ -122,7 +124,7 @@ public class MultipartUploadOutputStream extends OutputStream implements Abortab
       boolean anyNotDone = false;
       while (!anyNotDone) {
         anyNotDone = true;
-        for (Future future : this.futures) {
+        for (Future<PartETag> future : this.futures) {
           anyNotDone &= future.isDone();
         }
         if (this.progressable != null) {
@@ -131,8 +133,8 @@ public class MultipartUploadOutputStream extends OutputStream implements Abortab
         Thread.sleep(1000L);
       }
 
-      List etags = new ArrayList();
-      for (Future future : this.futures) {
+      List<PartETag> etags = new ArrayList<>();
+      for (Future<PartETag> future : this.futures) {
         etags.add(future.get());
       }
       LOG.debug("About to close multipart upload " + this.uploadId + " with bucket '" + this.bucketName + "' key '"
@@ -147,7 +149,7 @@ public class MultipartUploadOutputStream extends OutputStream implements Abortab
   }
 
   public void abort() {
-    for (Future future : this.futures) {
+    for (Future<PartETag> future : this.futures) {
       future.cancel(true);
     }
     this.s3.abortMultipartUpload(new AbortMultipartUploadRequest(this.bucketName, this.key, this.uploadId));
