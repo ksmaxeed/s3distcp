@@ -35,7 +35,8 @@ class CopyFilesRunable implements Runnable {
   private final String tempPath;
   private final Path finalPath;
   private final boolean groupWithNewLine;
-  private final byte[] newLine = "\n".getBytes(StandardCharsets.UTF_8);
+  private final Charset UTF_8 = StandardCharsets.UTF_8;
+  private final byte[] newLine = "\n".getBytes(UTF_8);
 
   public CopyFilesRunable(CopyFilesReducer reducer, List<FileInfo> fileInfos, Path tempPath, Path finalPath,
       boolean groupWithNewLine) {
@@ -54,7 +55,7 @@ class CopyFilesRunable implements Runnable {
     int len = 0;
     int lastLen = 0;
     byte[] buffer = new byte[this.reducer.getBufferSize()];
-    LOG.info("Buffer size " + this.reducer.getBufferSize());
+
     while ((len = inputStream.read(buffer)) > 0) {
       md.update(buffer, 0, len);
       outputStream.write(buffer, 0, len);
@@ -63,48 +64,37 @@ class CopyFilesRunable implements Runnable {
       lastLen = len;
     }
 
-    if (groupWithNewLine && !isLastFile) {
-      LOG.info("groupWithNewLine buffer[lastLen - 1] = " + buffer[lastLen - 1]);
+    if (groupWithNewLine && !isLastFile && buffer[lastLen - 1] != newLine[0]) {
       // 最後が改行でなければ改行を追記 !isLastFile &&
-      if (buffer[lastLen - 1] != newLine[0]) {
-        md.update(newLine, 0, 1);
-        outputStream.write(newLine, 0, 1);
-        this.reducer.progress();
-        bytesCopied += 1;
-      }
+      md.update(newLine, 0, 1);
+      outputStream.write(newLine, 0, 1);
+      this.reducer.progress();
+      bytesCopied += 1;
     }
-
     return bytesCopied;
   }
 
   private ProcessedFile downloadAndMergeInputFiles() throws IOException {
-    boolean finished = false;
     int numRetriesRemaining = this.reducer.getNumTransferRetries();
-    byte[] digest = null;
-    Path curTempPath = null;
-
+    
+    boolean finished = false;
     while ((!finished) && (numRetriesRemaining > 0)) {
       numRetriesRemaining--;
-      OutputStream outputStream = null;
+      final Path curTempPath = new Path(this.tempPath + UUID.randomUUID());
 
-      curTempPath = new Path(this.tempPath + UUID.randomUUID());
-      try {
+      try (OutputStream outputStream = this.reducer.openOutputStream(curTempPath)) {
         LOG.info("Opening temp file: " + curTempPath.toString());
-        outputStream = this.reducer.openOutputStream(curTempPath);
         MessageDigest md = MessageDigest.getInstance("MD5");
+
         for (Iterator<FileInfo> it = this.fileInfos.iterator(); it.hasNext();) {
-          FileInfo fileInfo = it.next();
-          try {
-            boolean isLastFile = !it.hasNext();
+          final FileInfo fileInfo = it.next();
+          final boolean isLastFile = !it.hasNext();
+          final Path filePath = new Path(fileInfo.inputFileName.toString());
+
+          try (InputStream inputStream = this.reducer.openInputStream(filePath)) {
             LOG.info("Starting download of " + fileInfo.inputFileName + " to " + curTempPath);
-            InputStream inputStream = this.reducer.openInputStream(new Path(fileInfo.inputFileName.toString()));
-            try {
-              long bytesCopied = copyStream(inputStream, outputStream, md, isLastFile);
-              LOG.info("Copied " + bytesCopied + " bytes");
-            } finally {
-              inputStream.close();
-            }
-          } catch (Exception e) {
+            copyStream(inputStream, outputStream, md, isLastFile);
+          } catch (IOException e) {
             if ((outputStream != null) && ((outputStream instanceof Abortable))) {
               LOG.warn("Output stream is abortable, aborting the output stream for " + fileInfo.inputFileName);
               Abortable abortable = (Abortable) outputStream;
@@ -112,28 +102,25 @@ class CopyFilesRunable implements Runnable {
             }
             throw e;
           }
+
           finished = true;
           LOG.info("Finished downloading " + fileInfo.inputFileName);
         }
-        outputStream.close();
-        digest = md.digest();
-        return new ProcessedFile(digest, curTempPath);
+
+        return new ProcessedFile(md.digest(), curTempPath);
+
       } catch (IOException e) {
         LOG.warn("Exception raised while copying file data to:  file=" + this.finalPath + " numRetriesRemaining="
             + numRetriesRemaining, e);
         try {
           FileSystem fs = curTempPath.getFileSystem(this.reducer.getConf());
           fs.delete(curTempPath, false);
-        } catch (IOException e1) {
+        } catch (IOException ignore) {
         }
-        if (numRetriesRemaining <= 0)
+        if (numRetriesRemaining <= 0) {
           throw e;
-      } catch (NoSuchAlgorithmException ignore) {
-      } finally {
-        try {
-          outputStream.close();
-        } catch (Exception e) {
         }
+      } catch (NoSuchAlgorithmException ignore) {
       }
     }
     return null;
@@ -167,23 +154,31 @@ class CopyFilesRunable implements Runnable {
     ProcessedFile processedFile = null;
     try {
       processedFile = downloadAndMergeInputFiles();
-    } catch (Exception e) {
+    } catch (IOException e) {
       LOG.warn("Error download input files. Not marking as committed", e);
     }
 
     while (retriesRemaining > 0) {
       retriesRemaining--;
       try {
-        Path curTempPath = processedFile.path;
-        FileSystem inFs = curTempPath.getFileSystem(this.reducer.getConf());
-        FileSystem outFs = this.finalPath.getFileSystem(this.reducer.getConf());
+        final Path curTempPath = processedFile.path;
+        final FileSystem inFs = curTempPath.getFileSystem(this.reducer.getConf());
+        final FileSystem outFs = this.finalPath.getFileSystem(this.reducer.getConf());
+        
         if (inFs.getUri().equals(outFs.getUri())) {
           LOG.info("Renaming " + curTempPath.toString() + " to " + this.finalPath.toString());
           inFs.mkdirs(this.finalPath.getParent());
           inFs.rename(curTempPath, this.finalPath);
+          
         } else {
           LOG.info("inFs.getUri()!=outFs.getUri(): " + inFs.getUri() + "!=" + outFs.getUri());
-          copyToFinalDestination(curTempPath, this.finalPath, processedFile, inFs, outFs);
+
+          if (Utils.isS3Scheme(outFs.getUri().getScheme())) {
+            byte[] digest = processedFile.checksum;
+            copyToS3FinalDestination(curTempPath, inFs, digest);
+          } else {
+            copyToFinalDestination(curTempPath);
+          }
         }
 
         for (FileInfo fileInfo : this.fileInfos) {
@@ -195,64 +190,65 @@ class CopyFilesRunable implements Runnable {
             deleteFs.delete(inPath, false);
           }
         }
+        
         Path localTempPath = new Path(this.tempPath);
         FileSystem fs = localTempPath.getFileSystem(this.reducer.getConf());
         fs.delete(localTempPath, true);
         return;
+      } catch (IOException e) {
+        LOG.warn("Error processing files. Not marking as committed", e);
       } catch (Exception e) {
         LOG.warn("Error processing files. Not marking as committed", e);
       }
     }
   }
 
-  private void copyToFinalDestination(Path curTempPath, Path finalPath, ProcessedFile processedFile, FileSystem inFs,
-      FileSystem outFs) throws Exception {
-    LOG.info("Copying " + curTempPath.toString() + " to " + finalPath.toString());
-    byte[] digest = processedFile.checksum;
-    InputStream inStream = this.reducer.openInputStream(curTempPath);
-    OutputStream outStream = null;
-    if (Utils.isS3Scheme(outFs.getUri().getScheme())) {
-      FileStatus status = inFs.getFileStatus(curTempPath);
-      URI outUri = finalPath.toUri();
-      String bucket = outUri.getHost();
 
-      String key = outUri.getPath().substring(1);
-      AmazonS3Client s3 = S3DistCp.createAmazonS3Client(this.reducer.getConf());
-      s3.setEndpoint(this.reducer.getConf().get("fs.s3n.endpoint", "s3.amazonaws.com"));
-      ObjectMetadata meta = new ObjectMetadata();
-      meta.setContentLength(status.getLen());
-      if (digest != null) {
-        meta.setContentMD5(new String(Base64.encodeBase64(digest), Charset.forName("UTF-8")));
-      }
+  private void copyToS3FinalDestination(Path curTempPath, FileSystem inFs, byte[] digest)
+      throws IOException {
 
-      if (this.reducer.shouldUseMutlipartUpload()) {
-        int chunkSize = this.reducer.getMultipartSize();
-        outStream = new MultipartUploadOutputStream(s3, Utils.createDefaultExecutorService(),
-            this.reducer.getProgressable(), bucket, key, meta, chunkSize, getTempDirs(this.reducer.getConf()));
-      } else {
-        int retries = this.reducer.getNumTransferRetries();
-        while (retries > 0) {
-          // MetricsSaver.StopWatch stopWatch = new MetricsSaver.StopWatch();
-          try {
-            retries--;
-            s3.putObject(outUri.getHost(), outUri.getPath(), this.reducer.openInputStream(curTempPath), meta);
-            // MetricsSaver.addValue("S3WriteDelay", stopWatch.elapsedTime());
-            // MetricsSaver.addValue("S3WriteBytes", status.getLen());
-          } catch (Exception e) {
-            // MetricsSaver.addValueWithError("S3WriteDelay", stopWatch.elapsedTime(), e);
-          }
-        }
+    final String bucket = this.finalPath.toUri().getHost();
+    final String key = this.finalPath.toUri().getPath().substring(1);
+    final FileStatus status = inFs.getFileStatus(curTempPath);
+
+    final AmazonS3Client s3 = S3DistCp.createAmazonS3Client(this.reducer.getConf());
+    s3.setEndpoint(this.reducer.getConf().get("fs.s3n.endpoint", "s3.amazonaws.com"));
+    final ObjectMetadata meta = new ObjectMetadata();
+    meta.setContentLength(status.getLen());
+    if (digest != null) {
+      meta.setContentMD5(new String(Base64.encodeBase64(digest), UTF_8));
+    }
+
+    if (this.reducer.shouldUseMutlipartUpload()) {
+      int chunkSize = this.reducer.getMultipartSize();
+      try (InputStream inStream = this.reducer.openInputStream(curTempPath);
+          OutputStream outStream = new MultipartUploadOutputStream(s3, Utils.createDefaultExecutorService(),
+              this.reducer.getProgressable(), bucket, key, meta, chunkSize, getTempDirs(this.reducer.getConf()))) {
+        MessageDigest md = MessageDigest.getInstance("MD5");
+        copyStream(inStream, outStream, md, true);
+        
+      } catch (NoSuchAlgorithmException ignore) {
       }
     } else {
-      outStream = this.reducer.openOutputStream(finalPath);
+      int retries = this.reducer.getNumTransferRetries();
+      while (retries > 0) {
+        retries--;
+        try (InputStream inputStream = this.reducer.openInputStream(curTempPath)) {
+          s3.putObject(bucket, finalPath.toUri().getPath(), inputStream, meta);
+        }
+      }
     }
+  }
+  
+  private void copyToFinalDestination(Path curTempPath) throws IOException {
+    LOG.info("Copying " + curTempPath.toString() + " to " + this.finalPath.toString());
 
-    if (outStream != null) {
+    try (InputStream inStream = this.reducer.openInputStream(curTempPath);
+        OutputStream outStream = this.reducer.openOutputStream(this.finalPath)) {
       MessageDigest md = MessageDigest.getInstance("MD5");
       copyStream(inStream, outStream, md, true);
-      outStream.close();
+    } catch (NoSuchAlgorithmException ignore) {
     }
-    inStream.close();
   }
 
   private class ProcessedFile {
