@@ -29,8 +29,7 @@ import com.google.common.collect.Lists;
 
 public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
   private static final Log LOG = LogFactory.getLog(CopyFilesReducer.class);
-  private static final List<String> validCodecs = Lists
-      .newArrayList(new String[] { "snappy", "gz", "lzo", "lzop", "gzip" });
+  private static final List<String> validCodecs = Lists.newArrayList(new String[] { "snappy", "gz", "lzo", "lzop", "gzip" });
   private OutputCollector<Text, Text> collector;
   private Reporter reporter;
   private SimpleExecutor transferQueue;
@@ -45,6 +44,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
   private boolean useMultipartUpload;
   private boolean numberFiles;
   private boolean groupWithNewLine;
+  private boolean jsonFileValidation;
   private int numberDeletePartition;
   private JobConf conf;
 
@@ -59,8 +59,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
 
       if (this.uncommitedFiles.size() > 0) {
         String message = String.format("Reducer task failed to copy %d files: %s etc",
-            new Object[] { Integer.valueOf(this.uncommitedFiles.size()),
-                ((FileInfo) this.uncommitedFiles.iterator().next()).inputFileName });
+                new Object[] { Integer.valueOf(this.uncommitedFiles.size()), ((FileInfo) this.uncommitedFiles.iterator().next()).inputFileName });
 
         throw new RuntimeException(message);
       }
@@ -100,6 +99,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
     this.useMultipartUpload = conf.getBoolean("s3DistCp.copyFiles.useMultipartUploads", true);
     this.groupWithNewLine = conf.getBoolean("s3DistCp.groupWithNewLine", false);
     this.numberDeletePartition = conf.getInt("s3DistCp.numberDeletePartition", 0);
+    this.jsonFileValidation = conf.getBoolean("s3DistCp.fileValidation.json", false);
   }
 
   public int getNumTransferRetries() {
@@ -153,16 +153,16 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
     return deleteDir(finalDir, this.numberDeletePartition) + "/" + name;
   }
 
-  public void reduce(Text groupKey, Iterator<FileInfo> fileInfos, OutputCollector<Text, Text> collector,
-      Reporter reporter) throws IOException {
+  public void reduce(Text groupKey, Iterator<FileInfo> fileInfos, OutputCollector<Text, Text> collector, Reporter reporter) throws IOException {
     this.collector = collector;
     this.reporter = reporter;
     long curSize = 0L;
     int groupNum = 0;
     int numFiles = 0;
     List<FileInfo> curFiles = new ArrayList<>();
+
     while (fileInfos.hasNext()) {
-      FileInfo fileInfo = ((FileInfo) fileInfos.next());//.clone();
+      FileInfo fileInfo = ((FileInfo) fileInfos.next()).clone();
       numFiles++;
       curSize += fileInfo.fileSize.get();
       curFiles.add(fileInfo);
@@ -192,8 +192,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
       if (numFiles == 1) {
         groupIndex = "";
       }
-      Path finalPath = new Path(
-          makeFinalPath(((FileInfo) curFiles.get(0)).fileUID.get(), intermediateFinal.toString(), groupId, groupIndex));
+      Path finalPath = new Path(makeFinalPath(((FileInfo) curFiles.get(0)).fileUID.get(), intermediateFinal.toString(), groupId, groupIndex));
       executeDownloads(this, curFiles, tempPath, finalPath);
     }
   }
@@ -214,7 +213,7 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
     }
     if (fileInfos.size() > 0) {
       LOG.info("Processing " + fileInfos.size() + " files");
-      this.transferQueue.execute(new CopyFilesRunable(reducer, fileInfos, tempPath, finalPath, this.groupWithNewLine));
+      this.transferQueue.execute(new CopyFilesRunable(reducer, fileInfos, tempPath, finalPath, this.groupWithNewLine, this.jsonFileValidation));
     } else {
       LOG.info("No files to process");
     }
@@ -242,11 +241,6 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
         return codec.createInputStream(inputStream);
       }
 
-      // if ((suffix.equalsIgnoreCase("lzop")) || (suffix.equalsIgnoreCase("lzo"))) {
-      // LzopCodec codec = new LzopCodec();
-      // codec.setConf(getConf());
-      // return codec.createInputStream(inputStream);
-      // }
     }
     return inputStream;
   }
@@ -256,11 +250,6 @@ public class CopyFilesReducer implements Reducer<Text, FileInfo, Text, Text> {
     OutputStream outputStream = outputFs.create(outputFilePath, this.reporter);
     if ((this.outputCodec.equalsIgnoreCase("gzip")) || (this.outputCodec.equalsIgnoreCase("gz")))
       return new GZIPOutputStream(outputStream);
-    // if (this.outputCodec.equalsIgnoreCase("lzo")) {
-    // LzopCodec codec = new LzopCodec();
-    // codec.setConf(getConf());
-    // return codec.createOutputStream(outputStream);
-    // }
     if (this.outputCodec.equalsIgnoreCase("snappy")) {
       SnappyCodec codec = new SnappyCodec();
       codec.setConf(getConf());

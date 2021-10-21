@@ -42,8 +42,8 @@ public class GroupFilesMapper implements Mapper<LongWritable, FileInfo, Text, Fi
       }
       key = new Text(path);
     } catch (URISyntaxException e) {
-      throw new RuntimeException(
-          new StringBuilder().append("Bad URI: ").append(fileInfo.inputFileName.toString()).toString(), e);
+      log.warn(new StringBuilder().append("Bad URI: ").append(fileInfo.inputFileName.toString()).toString(), e);
+      return;
     }
 
     if (this.pattern != null) {
@@ -57,7 +57,7 @@ public class GroupFilesMapper implements Mapper<LongWritable, FileInfo, Text, Fi
         key = new Text(builder.toString());
       }
     }
-    
+
     log.debug(new StringBuilder().append("Adding ").append(key.toString()).append(": ")
         .append(fileInfo.inputFileName.toString()).toString());
     collector.collect(key, fileInfo);

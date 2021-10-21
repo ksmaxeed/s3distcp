@@ -1,9 +1,21 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Scanner;
@@ -19,6 +31,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.Counters;
 import org.apache.hadoop.mapred.FileInputFormat;
@@ -47,12 +60,14 @@ public class S3DistCp implements Tool {
   private static final Log LOG = LogFactory.getLog(S3DistCp.class);
   public static final String S3_ENDPOINT_PDT = "s3-us-gov-west-1.amazonaws.com";
   private static String ec2MetaDataAz = null;
-  private Configuration conf;
+  private Configuration configuration;
 
   public void createInputFileList(Configuration conf, Path srcPath, FileInfoListing fileInfoListing) {
     URI srcUri = srcPath.toUri();
+
     if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n"))) {
       createInputFileListS3(conf, srcUri, fileInfoListing);
+
     } else {
       try {
         FileSystem fs = srcPath.getFileSystem(conf);
@@ -74,14 +89,18 @@ public class S3DistCp implements Tool {
     }
   }
 
-  public void createInputFileListS3(Configuration conf, URI srcUri, FileInfoListing fileInfoListing) {
+  public void createInputFileListS3(Configuration conf, final URI srcUri, FileInfoListing fileInfoListing) {
     AmazonS3Client s3Client = createAmazonS3Client(conf);
     ObjectListing objects = null;
     boolean finished = false;
     int retryCount = 0;
-    String scheme = srcUri.getScheme() + "://";
+
+    BufferedReader reader = getFileListOnHdfs("hdfs://file_list/list.txt");
+    
+    OutputStream os = createOutputStreamOnHdfs("hdfs://file_list/list.txt");
+
     while (!finished) {
-      ListObjectsRequest listObjectRequest = new ListObjectsRequest().withBucketName(srcUri.getHost());
+      ListObjectsRequest listObjectRequest = new ListObjectsRequest().withMaxKeys(10000).withBucketName(srcUri.getHost());
 
       if (srcUri.getPath().length() > 1) {
         listObjectRequest.setPrefix(srcUri.getPath().substring(1));
@@ -103,17 +122,114 @@ public class S3DistCp implements Tool {
         continue;
       }
 
-      for (S3ObjectSummary object : objects.getObjectSummaries())
-        if (object.getKey().endsWith("/")) {
-          LOG.info("Skipping key '" + object.getKey() + "' because it ends with '/'");
-        } else {
-          String s3FilePath = scheme + object.getBucketName() + "/" + object.getKey();
-          LOG.debug("About to add " + s3FilePath);
-          fileInfoListing.add(new Path(s3FilePath), object.getSize());
+      for (S3ObjectSummary object : objects.getObjectSummaries()) {
+        final String key = object.getKey();
+        final long size = object.getSize();
+        if (!key.endsWith("/")) {
+          StringBuffer sb = new StringBuffer();
+          final String s3FilePath = sb.append(srcUri.getScheme()).append("://").append(object.getBucketName()).append("/").append(key).toString();
+          // LOG.debug("About to add " + s3FilePath);
+          writeOutputStreamOnHdfs(os, s3FilePath, size);
+          fileInfoListing.add(new Path(s3FilePath), size);
         }
-      if (!objects.isTruncated())
+      }
+      closeOutputStreamOnHdfs(os);
+      if (!objects.isTruncated()) {
         finished = true;
+      }
     }
+  }
+
+  private OutputStream createOutputStreamOnHdfs(String hdfsPathString) {
+    Configuration conf = new Configuration();
+    OutputStream os = null;
+    Path hdfsPath = new Path(hdfsPathString);
+    try {
+      FileSystem fs = hdfsPath.getFileSystem(conf);
+      os = fs.create(hdfsPath);
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+    return os;
+  }
+
+  private void closeOutputStreamOnHdfs(OutputStream os) {
+    try {
+      os.close();
+    } catch (IOException ignore) {
+    }
+  }
+
+  private StringBuilder stringFileList = new StringBuilder(1000000);
+  private int count = 0;
+
+  private void writeOutputStreamOnHdfs(OutputStream os, String s3filepath, long size) {
+    try {
+      stringFileList.append(s3filepath).append("$ SIZE $").append(size).append("¥n");
+      count++;
+      if (count >= 100000) {
+        Configuration conf = new Configuration();
+        InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
+        IOUtils.copyBytes(bais, os, conf, false);
+        count = 0;
+        stringFileList = new StringBuilder(1000000);
+      }
+    } catch (UnsupportedEncodingException ignore) {
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private BufferedReader getFileListOnHdfs(String hdfsPathString) {
+    final ByteArrayOutputStream os = new ByteArrayOutputStream();
+
+    Configuration conf = new Configuration();
+
+    InputStream is = null;
+
+    Path hdfsPath = new Path(hdfsPathString);
+    FileSystem fs = null;
+    try {
+      fs = hdfsPath.getFileSystem(conf);
+      fs.setVerifyChecksum(true);
+      is = fs.open(hdfsPath);
+    } catch (IOException e) {
+      return null;
+    }
+    BufferedReader r = null;
+    try {
+      IOUtils.copyBytes(is, os, conf, false);
+
+      // https://stackoverflow.com/questions/5778658/how-to-convert-outputstream-to-inputstream
+      PipedInputStream in = new PipedInputStream();
+      final PipedOutputStream out = new PipedOutputStream(in);
+      new Thread(new Runnable() {
+        public void run() {
+          try {
+            os.writeTo(out);
+          } catch (IOException ignore) {
+          } finally {
+            if (out != null) {
+              try {
+                out.close();
+              } catch (IOException ignore) {
+              }
+            }
+          }
+        }
+      }).start();
+      r = new BufferedReader(new InputStreamReader(in));
+
+    } catch (IOException e) {
+      e.printStackTrace();
+    } finally {
+      try {
+        is.close();
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
+    return r;
   }
 
   public static AmazonS3Client createAmazonS3Client(Configuration conf) {
@@ -147,7 +263,7 @@ public class S3DistCp implements Tool {
   }
 
   public int run(S3DistCpOptions options) {
-    JobConf job = new JobConf(getConf(), S3DistCp.class);
+    JobConf jobConf = new JobConf(getConf(), S3DistCp.class);
     Path srcPath = new Path(options.getSrcPath());
     if (!srcPath.isAbsolute()) {
       LOG.fatal("Source path must be absolute");
@@ -155,15 +271,15 @@ public class S3DistCp implements Tool {
     }
 
     try {
-      FileSystem fs = FileSystem.get(srcPath.toUri(), job);
+      FileSystem fs = FileSystem.get(srcPath.toUri(), jobConf);
       srcPath = fs.getFileStatus(srcPath).getPath();
     } catch (Exception e) {
       LOG.fatal("Failed to get source file system", e);
       throw new RuntimeException("Failed to get source file system", e);
     }
-    job.set("s3DistCp.copyfiles.srcDir", srcPath.toString());
+    jobConf.set("s3DistCp.copyfiles.srcDir", srcPath.toString());
 
-    String tempDirRoot = job.get("s3DistCp.copyfiles.reducer.tempDir", options.getTmpDir());
+    String tempDirRoot = jobConf.get("s3DistCp.copyfiles.reducer.tempDir", options.getTmpDir());
     if (tempDirRoot == null) {
       tempDirRoot = "hdfs:///tmp";
     }
@@ -180,14 +296,14 @@ public class S3DistCp implements Tool {
       System.exit(4);
     }
 
-    job.set("s3DistCp.copyfiles.reducer.tempDir", tempDirRoot);
+    jobConf.set("s3DistCp.copyfiles.reducer.tempDir", tempDirRoot);
     LOG.info("Using output path '" + outputPath.toString() + "'");
 
-    job.set("s3DistCp.copyfiles.destDir", destPath.toString());
-    job.setBoolean("s3DistCp.copyfiles.reducer.numberFiles", options.getNumberFiles().booleanValue());
+    jobConf.set("s3DistCp.copyfiles.destDir", destPath.toString());
+    jobConf.setBoolean("s3DistCp.copyfiles.reducer.numberFiles", options.getNumberFiles().booleanValue());
 
-    deleteRecursive(job, inputPath);
-    deleteRecursive(job, outputPath);
+    deleteRecursive(jobConf, inputPath);
+    deleteRecursive(jobConf, outputPath);
 
     FileInfoListing fileInfoListing = null;
     File manifestFile = null;
@@ -200,8 +316,7 @@ public class S3DistCp implements Tool {
       if (!options.copyFromManifest.booleanValue()) {
         previousManifest = options.getPreviousManifest();
       }
-      fileInfoListing = new FileInfoListing(job, srcPath, inputPath, destPath, options.getStartingIndex().longValue(),
-          manifestFile, previousManifest);
+      fileInfoListing = new FileInfoListing(jobConf, srcPath, inputPath, destPath, options.getStartingIndex().longValue(), manifestFile, previousManifest);
     } catch (IOException e1) {
       LOG.fatal("Error initializing manifest file", e1);
       System.exit(5);
@@ -219,16 +334,16 @@ public class S3DistCp implements Tool {
       }
       try {
         fileInfoListing.setGroupBy(Pattern.compile(groupByPattern));
-        job.set("s3DistCp.listfiles.gropubypattern", groupByPattern);
+        jobConf.set("s3DistCp.listfiles.gropubypattern", groupByPattern);
       } catch (Exception e) {
         System.err.println("Invalid group by pattern");
         System.exit(1);
       }
       boolean groupWithNewLine = options.getGroupWithNewLine();
       if (groupWithNewLine) {
-        job.set("s3DistCp.listfiles.gropubypattern.withnewline", "true");
+        jobConf.set("s3DistCp.listfiles.gropubypattern.withnewline", "true");
       } else {
-        job.set("s3DistCp.listfiles.gropubypattern.withnewline", "false");
+        jobConf.set("s3DistCp.listfiles.gropubypattern.withnewline", "false");
       }
     }
 
@@ -237,41 +352,42 @@ public class S3DistCp implements Tool {
     }
 
     if (options.getS3Endpoint() != null)
-      job.set("fs.s3n.endpoint", options.getS3Endpoint());
+      jobConf.set("fs.s3n.endpoint", options.getS3Endpoint());
     else if (Utils.isGovCloud(ec2MetaDataAz)) {
-      job.set("fs.s3n.endpoint", S3_ENDPOINT_PDT);
+      jobConf.set("fs.s3n.endpoint", S3_ENDPOINT_PDT);
     }
 
-    job.setBoolean("s3DistCp.copyFiles.useMultipartUploads", !options.getDisableMultipartUpload().booleanValue());
+    jobConf.setBoolean("s3DistCp.copyFiles.useMultipartUploads", !options.getDisableMultipartUpload().booleanValue());
     if (options.getMultipartUploadPartSize() != null) {
       Integer partSize = options.getMultipartUploadPartSize();
-      job.setInt("s3DistCp.copyFiles.multipartUploadPartSize", partSize.intValue() * 1024 * 1024);
+      jobConf.setInt("s3DistCp.copyFiles.multipartUploadPartSize", partSize.intValue() * 1024 * 1024);
     }
 
-    job.setBoolean("s3DistCp.groupWithNewLine", options.getGroupWithNewLine());
-    job.setInt("s3DistCp.numberDeletePartition", options.getNumberDeletePartition());
+    jobConf.setBoolean("s3DistCp.groupWithNewLine", options.getGroupWithNewLine());
+    jobConf.setInt("s3DistCp.numberDeletePartition", options.getNumberDeletePartition());
+    jobConf.setBoolean("s3DistCp.fileValidation.json", "json".equalsIgnoreCase(options.getFileValidation()));
 
     try {
       if ((options.getCopyFromManifest()) && (options.getPreviousManifest() != null)) {
-        for (ManifestEntry entry : options.getPreviousManifest().values())
+        for (ManifestEntry entry : options.getPreviousManifest().values()) {
           fileInfoListing.add(new Path(entry.path), new Path(entry.srcDir), entry.size);
+        }
       } else {
-        createInputFileList(job, srcPath, fileInfoListing);
+        createInputFileList(jobConf, srcPath, fileInfoListing);
       }
-      LOG.info("Created " + fileInfoListing.getFileIndex() + " files to copy " + fileInfoListing.getRecordIndex()
-          + " files ");
+      LOG.info("Created " + fileInfoListing.getFileIndex() + " files to copy " + fileInfoListing.getRecordIndex() + " files ");
     } finally {
       fileInfoListing.close();
     }
 
-    job.setJobName("S3DistCp: " + srcPath.toString() + " -> " + destPath.toString());
+    jobConf.setJobName("S3DistCp: " + srcPath.toString() + " -> " + destPath.toString());
 
-    job.setReduceSpeculativeExecution(false);
+    jobConf.setReduceSpeculativeExecution(false);
 
     if (options.getTargetSize() != null) {
       try {
         long targetSize = options.getTargetSize().intValue();
-        job.setLong("s3DistCp.copyfiles.reducer.targetSize", targetSize * 1024L * 1024L);
+        jobConf.setLong("s3DistCp.copyfiles.reducer.targetSize", targetSize * 1024L * 1024L);
       } catch (Exception e) {
         System.err.println("Error parsing target file size");
         System.exit(2);
@@ -279,22 +395,22 @@ public class S3DistCp implements Tool {
     }
 
     String outputCodec = options.getOutputCodec();
-    job.set("s3DistCp.copyfiles.reducer.outputCodec", outputCodec);
+    jobConf.set("s3DistCp.copyfiles.reducer.outputCodec", outputCodec);
 
-    job.setBoolean("s3DistCp.copyFiles.deleteFilesOnSuccess", options.getDeleteOnSuccess().booleanValue());
+    jobConf.setBoolean("s3DistCp.copyFiles.deleteFilesOnSuccess", options.getDeleteOnSuccess().booleanValue());
 
-    FileInputFormat.addInputPath(job, inputPath);
-    FileOutputFormat.setOutputPath(job, outputPath);
+    FileInputFormat.addInputPath(jobConf, inputPath);
+    FileOutputFormat.setOutputPath(jobConf, outputPath);
 
-    job.setInputFormat(SequenceFileInputFormat.class);
-    job.setOutputKeyClass(Text.class);
-    job.setOutputValueClass(FileInfo.class);
-    job.setMapperClass(GroupFilesMapper.class);
-    job.setReducerClass(CopyFilesReducer.class);
-    job.setOutputFormat(TextOutputFormat.class);
+    jobConf.setInputFormat(SequenceFileInputFormat.class);
+    jobConf.setOutputKeyClass(Text.class);
+    jobConf.setOutputValueClass(FileInfo.class);
+    jobConf.setMapperClass(GroupFilesMapper.class);
+    jobConf.setReducerClass(CopyFilesReducer.class);
+    jobConf.setOutputFormat(TextOutputFormat.class);
     try {
-      RunningJob runningJob = JobClient.runJob(job);
-      deleteRecursiveNoThrow(job, tempPath);
+      RunningJob runningJob = JobClient.runJob(jobConf);
+      deleteRecursiveNoThrow(jobConf, tempPath);
       Counters counters = runningJob.getCounters();
       Counters.Group group = counters.getGroup("org.apache.hadoop.mapred.Task$Counter");
       long reduceOutputRecords = group.getCounterForName("REDUCE_OUTPUT_RECORDS").getValue();
@@ -302,15 +418,15 @@ public class S3DistCp implements Tool {
         LOG.error(reduceOutputRecords + " files failed to copy");
         throw new RuntimeException(reduceOutputRecords + " files failed to copy");
       }
-      FileSystem tempFs = FileSystem.get(tempPath.toUri(), job);
+      FileSystem tempFs = FileSystem.get(tempPath.toUri(), jobConf);
       tempFs.delete(tempPath, true);
       if (manifestFile != null) {
-        FileSystem destFs = FileSystem.get(destPath.toUri(), job);
+        FileSystem destFs = FileSystem.get(destPath.toUri(), jobConf);
         destFs.copyFromLocalFile(new Path(manifestFile.getAbsolutePath()), destPath);
         manifestFile.delete();
       }
     } catch (IOException e) {
-      deleteRecursiveNoThrow(job, tempPath);
+      deleteRecursiveNoThrow(jobConf, tempPath);
       throw new RuntimeException("Error running job", e);
     }
     return 0;
@@ -334,11 +450,11 @@ public class S3DistCp implements Tool {
   }
 
   public Configuration getConf() {
-    return this.conf;
+    return this.configuration;
   }
 
   public void setConf(Configuration conf) {
-    this.conf = conf;
+    this.configuration = conf;
   }
 
   public static class S3DistCpOptions {
@@ -352,6 +468,7 @@ public class S3DistCp implements Tool {
     String groupByPattern;
     boolean groupWithNewLine = false;
     Integer numberDeletePartition = 0;
+    String fileValidation = "";
     Integer targetSize;
     String outputCodec = "keep";
     String s3Endpoint;
@@ -373,30 +490,24 @@ public class S3DistCp implements Tool {
       OptionWithArg srcOption = options.withArg("--src", "Directory to copy files from");
       OptionWithArg destOption = options.withArg("--dest", "Directory to copy files to");
       OptionWithArg tmpDirOption = options.withArg("--tmpDir", "Temporary directory location");
-      OptionWithArg srcPatternOption = options.withArg("--srcPattern",
-          "Include only source files matching this pattern");
-      OptionWithArg filePerMapperOption = options.withArg("--filesPerMapper",
-          "Place up to this number of files in each map task");
+      OptionWithArg srcPatternOption = options.withArg("--srcPattern", "Include only source files matching this pattern");
+      OptionWithArg filePerMapperOption = options.withArg("--filesPerMapper", "Place up to this number of files in each map task");
       OptionWithArg groupByPatternOption = options.withArg("--groupBy", "Pattern to group input files by");
       OptionWithArg groupWithNewLineOption = options.withArg("--groupWithNewLine", "Grouping with new line option");
       OptionWithArg numberDeletePartition = options.withArg("--numberDeletePartition", "Number of delete partitions");
+      OptionWithArg fileValidation = options.withArg("--fileValidation", "Validation type to input file");
 
       OptionWithArg targetSizeOption = options.withArg("--targetSize", "Target size for output files");
       OptionWithArg outputCodecOption = options.withArg("--outputCodec", "Compression codec for output files");
       OptionWithArg s3EndpointOption = options.withArg("--s3Endpoint", "S3 endpoint to use for uploading files");
-      SimpleOption deleteOnSuccessOption = options.noArg("--deleteOnSuccess",
-          "Delete input files after a successful copy");
-      SimpleOption disableMultipartUploadOption = options.noArg("--disableMultipartUpload",
-          "Disable the use of multipart upload");
-      OptionWithArg multipartUploadPartSizeOption = options.withArg("--multipartUploadChunkSize",
-          "The size in MiB of the multipart upload part size");
-      OptionWithArg startingIndexOption = options.withArg("--startingIndex",
-          "The index to start with for file numbering");
+      SimpleOption deleteOnSuccessOption = options.noArg("--deleteOnSuccess", "Delete input files after a successful copy");
+      SimpleOption disableMultipartUploadOption = options.noArg("--disableMultipartUpload", "Disable the use of multipart upload");
+      OptionWithArg multipartUploadPartSizeOption = options.withArg("--multipartUploadChunkSize", "The size in MiB of the multipart upload part size");
+      OptionWithArg startingIndexOption = options.withArg("--startingIndex", "The index to start with for file numbering");
       SimpleOption numberFilesOption = options.noArg("--numberFiles", "Prepend sequential numbers the file names");
       OptionWithArg outputManifest = options.withArg("--outputManifest", "The name of the manifest file");
       OptionWithArg previousManifest = options.withArg("--previousManifest", "The path to an existing manifest file");
-      SimpleOption copyFromManifest = options.noArg("--copyFromManifest",
-          "Copy from a manifest instead of listing a directory");
+      SimpleOption copyFromManifest = options.noArg("--copyFromManifest", "Copy from a manifest instead of listing a directory");
       options.parseArguments(args);
       if (helpOption.defined()) {
         LOG.info(options.helpText());
@@ -432,6 +543,9 @@ public class S3DistCp implements Tool {
       }
       if (numberDeletePartition.defined()) {
         setNumberDeletePartition(Integer.valueOf(numberDeletePartition.value));
+      }
+      if (fileValidation.defined()) {
+        setFileValidation(fileValidation.value);
       }
 
       if (targetSizeOption.defined()) {
@@ -473,16 +587,16 @@ public class S3DistCp implements Tool {
       Map<String, ManifestEntry> manifest = null;
       FSDataInputStream inStream = null;
       try {
-        
+
         manifest = new TreeMap<>();
-        
+
         FileSystem fs = FileSystem.get(manifestPath.toUri(), config);
         inStream = fs.open(manifestPath);
         GZIPInputStream gzipStream = new GZIPInputStream(inStream);
         Scanner scanner = new Scanner(gzipStream);
-        
+
         manifest = new TreeMap<>();
-        
+
         while (scanner.hasNextLine()) {
           String line = scanner.nextLine();
           ManifestEntry entry = (ManifestEntry) gson.fromJson(line, ManifestEntry.class);
@@ -589,6 +703,14 @@ public class S3DistCp implements Tool {
 
     public void setNumberDeletePartition(int a) {
       this.numberDeletePartition = a;
+    }
+
+    public String getFileValidation() {
+      return this.fileValidation;
+    }
+
+    public void setFileValidation(String a) {
+      this.fileValidation = a;
     }
 
     public Integer getTargetSize() {

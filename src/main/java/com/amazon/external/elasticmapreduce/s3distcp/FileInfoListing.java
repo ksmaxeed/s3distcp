@@ -51,7 +51,7 @@ public class FileInfoListing {
       this.manifestStream = new GZIPOutputStream(new FileOutputStream(manifestFile));
   }
 
-  public void openNewFile() {
+  private void openNewFile() {
     try {
       if (this.writer != null) {
         this.writer.close();
@@ -95,7 +95,6 @@ public class FileInfoListing {
       if (builder.toString().length() == 0) {
         return;
       }
-
     }
 
     if ((this.writer == null) || (this.recordsInThisFile.longValue() > this.recordsPerFile.longValue())) {

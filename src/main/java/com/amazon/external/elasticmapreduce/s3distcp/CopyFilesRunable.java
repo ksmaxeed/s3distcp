@@ -1,10 +1,10 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -12,6 +12,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.apache.commons.codec.binary.Base64;
@@ -27,6 +28,9 @@ import org.apache.hadoop.fs.common.Abortable;
 //import amazon.emr.metrics.MetricsSaver.StopWatch;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonParser.Feature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 class CopyFilesRunable implements Runnable {
   private static final Log LOG = LogFactory.getLog(CopyFilesRunable.class);
@@ -35,28 +39,48 @@ class CopyFilesRunable implements Runnable {
   private final String tempPath;
   private final Path finalPath;
   private final boolean groupWithNewLine;
+  private final boolean jsonFileValidation;
   private final Charset UTF_8 = StandardCharsets.UTF_8;
   private final byte[] newLine = "\n".getBytes(UTF_8);
+  private final ObjectMapper objectMapper;
 
   public CopyFilesRunable(CopyFilesReducer reducer, List<FileInfo> fileInfos, Path tempPath, Path finalPath,
-      boolean groupWithNewLine) {
+      boolean groupWithNewLine, boolean jsonFileValidation) {
     this.fileInfos = fileInfos;
     this.reducer = reducer;
     this.tempPath = tempPath.toString();
     this.finalPath = finalPath;
     this.groupWithNewLine = groupWithNewLine;
+    this.jsonFileValidation = jsonFileValidation;
+
+    this.objectMapper = new ObjectMapper();
+    objectMapper.configure(Feature.ALLOW_SINGLE_QUOTES, true);
+    objectMapper.configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true);
+
     LOG.info("Creating CopyFilesRunnable " + tempPath.toString() + ":" + finalPath.toString());
   }
 
-  private long copyStream(InputStream inputStream, OutputStream outputStream, MessageDigest md,
+  private long copyStream1(final InputStream inputStream, OutputStream outputStream, MessageDigest md,
       final boolean isLastFile) throws IOException {
     long bytesCopied = 0L;
+
+    final InputStream inputStreamLocal;
+    if (this.jsonFileValidation) {
+      try {
+        Map<?, ?> map = this.objectMapper.readValue(inputStream, Map.class);
+        inputStreamLocal = new ByteArrayInputStream(objectMapper.writeValueAsBytes(map));
+      } catch (IOException e) {
+        LOG.warn("Error json parsing or mapping ", e);
+        return 0L;
+      }
+    } else {
+      inputStreamLocal = inputStream;
+    }
 
     int len = 0;
     int lastLen = 0;
     byte[] buffer = new byte[this.reducer.getBufferSize()];
-
-    while ((len = inputStream.read(buffer)) > 0) {
+    while ((len = inputStreamLocal.read(buffer)) > 0) {
       md.update(buffer, 0, len);
       outputStream.write(buffer, 0, len);
       this.reducer.progress();
@@ -64,19 +88,36 @@ class CopyFilesRunable implements Runnable {
       lastLen = len;
     }
 
-    if (groupWithNewLine && !isLastFile && buffer[lastLen - 1] != newLine[0]) {
-      // 最後が改行でなければ改行を追記 !isLastFile &&
+    if (this.groupWithNewLine && !isLastFile && buffer[lastLen - 1] != newLine[0]) {
+      // 最後が改行でなければ改行を追記
       md.update(newLine, 0, 1);
       outputStream.write(newLine, 0, 1);
       this.reducer.progress();
       bytesCopied += 1;
     }
+
+    return bytesCopied;
+  }
+
+  private long copyStream2(InputStream inputStream, OutputStream outputStream, MessageDigest md) throws IOException {
+    long bytesCopied = 0L;
+
+    int len = 0;
+    byte[] buffer = new byte[this.reducer.getBufferSize()];
+
+    while ((len = inputStream.read(buffer)) > 0) {
+      md.update(buffer, 0, len);
+      outputStream.write(buffer, 0, len);
+      this.reducer.progress();
+      bytesCopied += len;
+    }
+
     return bytesCopied;
   }
 
   private ProcessedFile downloadAndMergeInputFiles() throws IOException {
     int numRetriesRemaining = this.reducer.getNumTransferRetries();
-    
+
     boolean finished = false;
     while ((!finished) && (numRetriesRemaining > 0)) {
       numRetriesRemaining--;
@@ -93,7 +134,7 @@ class CopyFilesRunable implements Runnable {
 
           try (InputStream inputStream = this.reducer.openInputStream(filePath)) {
             LOG.info("Starting download of " + fileInfo.inputFileName + " to " + curTempPath);
-            copyStream(inputStream, outputStream, md, isLastFile);
+            copyStream1(inputStream, outputStream, md, isLastFile);
           } catch (IOException e) {
             if ((outputStream != null) && ((outputStream instanceof Abortable))) {
               LOG.warn("Output stream is abortable, aborting the output stream for " + fileInfo.inputFileName);
@@ -141,7 +182,7 @@ class CopyFilesRunable implements Runnable {
           tempDirs.add(new File(backupDirs[directoryIndex]));
         }
         result.delete();
-      } catch (Exception e) {
+      } catch (IOException ignore) {
       }
       directoryIndex += 1;
     }
@@ -164,12 +205,12 @@ class CopyFilesRunable implements Runnable {
         final Path curTempPath = processedFile.path;
         final FileSystem inFs = curTempPath.getFileSystem(this.reducer.getConf());
         final FileSystem outFs = this.finalPath.getFileSystem(this.reducer.getConf());
-        
+
         if (inFs.getUri().equals(outFs.getUri())) {
           LOG.info("Renaming " + curTempPath.toString() + " to " + this.finalPath.toString());
           inFs.mkdirs(this.finalPath.getParent());
           inFs.rename(curTempPath, this.finalPath);
-          
+
         } else {
           LOG.info("inFs.getUri()!=outFs.getUri(): " + inFs.getUri() + "!=" + outFs.getUri());
 
@@ -190,7 +231,7 @@ class CopyFilesRunable implements Runnable {
             deleteFs.delete(inPath, false);
           }
         }
-        
+
         Path localTempPath = new Path(this.tempPath);
         FileSystem fs = localTempPath.getFileSystem(this.reducer.getConf());
         fs.delete(localTempPath, true);
@@ -203,9 +244,7 @@ class CopyFilesRunable implements Runnable {
     }
   }
 
-
-  private void copyToS3FinalDestination(Path curTempPath, FileSystem inFs, byte[] digest)
-      throws IOException {
+  private void copyToS3FinalDestination(Path curTempPath, FileSystem inFs, byte[] digest) throws IOException {
 
     final String bucket = this.finalPath.toUri().getHost();
     final String key = this.finalPath.toUri().getPath().substring(1);
@@ -225,8 +264,8 @@ class CopyFilesRunable implements Runnable {
           OutputStream outStream = new MultipartUploadOutputStream(s3, Utils.createDefaultExecutorService(),
               this.reducer.getProgressable(), bucket, key, meta, chunkSize, getTempDirs(this.reducer.getConf()))) {
         MessageDigest md = MessageDigest.getInstance("MD5");
-        copyStream(inStream, outStream, md, true);
-        
+        copyStream2(inStream, outStream, md);
+
       } catch (NoSuchAlgorithmException ignore) {
       }
     } else {
@@ -239,14 +278,14 @@ class CopyFilesRunable implements Runnable {
       }
     }
   }
-  
+
   private void copyToFinalDestination(Path curTempPath) throws IOException {
     LOG.info("Copying " + curTempPath.toString() + " to " + this.finalPath.toString());
 
     try (InputStream inStream = this.reducer.openInputStream(curTempPath);
         OutputStream outStream = this.reducer.openOutputStream(this.finalPath)) {
       MessageDigest md = MessageDigest.getInstance("MD5");
-      copyStream(inStream, outStream, md, true);
+      copyStream2(inStream, outStream, md);
     } catch (NoSuchAlgorithmException ignore) {
     }
   }

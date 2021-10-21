@@ -1,8 +1,13 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -22,15 +27,62 @@ import org.apache.hadoop.mapred.lib.IdentityReducer;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonParser.Feature;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 public class CreateSampleData implements Tool {
   private static final Log LOG = LogFactory.getLog(CreateSampleData.class);
   protected JobConf conf;
+  private static final Charset UTF_8 = StandardCharsets.UTF_8;
+
+  private final ObjectMapper objectMapper = new ObjectMapper();
+
+  // JavaオブジェクトをJSONに変換
+  public String mapToJsonString(Map<String, Object> map) throws JsonProcessingException {
+
+    return objectMapper.writeValueAsString(map);
+  }
+
+  // JSONをJavaオブジェクトに変換
+  private static Map<String, Object> getObjFromJSON(String json)
+      throws JsonParseException, JsonMappingException, IOException {
+
+    TypeReference<Map<String, Object>> reference = new TypeReference<Map<String, Object>>() {
+    };
+    ObjectMapper objectMapper = new ObjectMapper();
+    objectMapper.configure(Feature.ALLOW_SINGLE_QUOTES, true);
+    objectMapper.configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true);
+    return objectMapper.readValue(json, reference);
+  }
 
   public static void main(String[] args) throws Exception {
-    JobConf job = new JobConf(CreateSampleData.class);
-    CreateSampleData distcp = new CreateSampleData(job);
-    int result = ToolRunner.run(distcp, args);
-    System.exit(result);
+    ObjectMapper objectMapper = new ObjectMapper();
+    objectMapper.configure(Feature.ALLOW_SINGLE_QUOTES, true);
+    objectMapper.configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true);
+
+    try {
+      String org = "{\"aaa\" : 1, 'bbb': [ \"moji\", \"moji2\" ]  }";
+      InputStream inputStream = IOUtils.toInputStream(org, UTF_8);
+      String str = IOUtils.toString(inputStream, UTF_8);
+      LOG.info(str + "¥n");
+      Map<String, Object> map = getObjFromJSON(str);
+
+      String formated = objectMapper.writeValueAsString(map);
+
+      LOG.info(formated);
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+
+     JobConf job = new JobConf(CreateSampleData.class);
+     CreateSampleData distcp = new CreateSampleData(job);
+     int result = ToolRunner.run(distcp, args);
+     System.exit(result);
   }
 
   public CreateSampleData(JobConf conf) {
@@ -105,11 +157,10 @@ public class CreateSampleData implements Tool {
 
   public int run(String[] args) throws Exception {
     String outputLocation = args[0];
-
     long numFiles = this.conf.getLong("createSampleData.numFiles", 5L);
     long fileSize = this.conf.getLong("createSampleData.fileSize", 104857600L);
     String jobName = this.conf.get("createSampleData.baseJobName", "CreateSampleData");
-    String tmpPathString = this.conf.get("createSampleData.tmpDir", "hdfs:///tmp/createSampleData");
+    String tmpPathString = this.conf.get("createSampleData.tmpDir", "/Users/Nine/Documents/learnspace/dummy_data/tmp/"); // "hdfs:///tmp/createSampleData");
     String inputPathString = this.conf.get("createSampleData.workingInputDir", join(tmpPathString, "input"));
     String outputPathString = this.conf.get("createSampleData.workingOutputDir", join(tmpPathString, "output"));
 
