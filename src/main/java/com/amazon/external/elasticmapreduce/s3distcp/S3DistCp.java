@@ -95,53 +95,74 @@ public class S3DistCp implements Tool {
     boolean finished = false;
     int retryCount = 0;
 
-    BufferedReader reader = getFileListOnHdfs("hdfs://file_list/list.txt");
+    InputStream is = getFileListOnHdfs(conf, "hdfs:///filelistspace/list5.txt");
     
-    OutputStream os = createOutputStreamOnHdfs("hdfs://file_list/list.txt");
+    if (is == null) {
+      OutputStream os = createOutputStreamOnHdfs(conf, "hdfs:///filelistspace/list5.txt");
+      while (!finished) {
+        ListObjectsRequest listObjectRequest = new ListObjectsRequest().withBucketName(srcUri.getHost());
 
-    while (!finished) {
-      ListObjectsRequest listObjectRequest = new ListObjectsRequest().withMaxKeys(10000).withBucketName(srcUri.getHost());
+        if (srcUri.getPath().length() > 1) {
+          listObjectRequest.setPrefix(srcUri.getPath().substring(1));
+        }
+        if (objects != null) {
+          listObjectRequest.withMaxKeys(Integer.valueOf(1000)).withMarker(objects.getNextMarker());
+        }
 
-      if (srcUri.getPath().length() > 1) {
-        listObjectRequest.setPrefix(srcUri.getPath().substring(1));
+        try {
+          objects = s3Client.listObjects(listObjectRequest);
+          retryCount = 0;
+        } catch (AmazonClientException e) {
+          retryCount++;
+          if (retryCount > 10) {
+            LOG.fatal("Failed to list objects", e);
+            throw e;
+          }
+          LOG.warn("Error listing objects: " + e.getMessage(), e);
+          continue;
+        }
+
+        for (S3ObjectSummary object : objects.getObjectSummaries()) {
+          final String key = object.getKey();
+          final long size = object.getSize();
+          if (!key.endsWith("/")) {
+            StringBuffer sb = new StringBuffer();
+            final String s3FilePath = sb.append(srcUri.getScheme()).append("://").append(object.getBucketName()).append("/").append(key).toString();
+            // LOG.debug("About to add " + s3FilePath);
+            writeOutputStreamOnHdfs(conf, os, s3FilePath, size);
+            fileInfoListing.add(new Path(s3FilePath), size);
+          }
+        }
+        closeOutputStreamOnHdfs(conf, os);
+        if (!objects.isTruncated()) {
+          finished = true;
+        }
       }
-      if (objects != null) {
-        listObjectRequest.withMaxKeys(Integer.valueOf(1000)).withMarker(objects.getNextMarker());
-      }
-
+    } else {
+      LOG.info("  --- else ---  ");
+      String text;
       try {
-        objects = s3Client.listObjects(listObjectRequest);
-        retryCount = 0;
-      } catch (AmazonClientException e) {
-        retryCount++;
-        if (retryCount > 10) {
-          LOG.fatal("Failed to list objects", e);
-          throw e;
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+        while ((text = reader.readLine()) != null) {
+          //LOG.info(text);
+          String[] pathsize = text.split(";");
+          fileInfoListing.add(new Path(pathsize[0]), Long.parseLong(pathsize[1]));
         }
-        LOG.warn("Error listing objects: " + e.getMessage(), e);
-        continue;
-      }
-
-      for (S3ObjectSummary object : objects.getObjectSummaries()) {
-        final String key = object.getKey();
-        final long size = object.getSize();
-        if (!key.endsWith("/")) {
-          StringBuffer sb = new StringBuffer();
-          final String s3FilePath = sb.append(srcUri.getScheme()).append("://").append(object.getBucketName()).append("/").append(key).toString();
-          // LOG.debug("About to add " + s3FilePath);
-          writeOutputStreamOnHdfs(os, s3FilePath, size);
-          fileInfoListing.add(new Path(s3FilePath), size);
+      } catch (NumberFormatException e) {
+        e.printStackTrace();
+      } catch (IOException e) {
+        e.printStackTrace();
+      } finally {
+        try {
+          is.close();
+        } catch (IOException e) {
+          e.printStackTrace();
         }
-      }
-      closeOutputStreamOnHdfs(os);
-      if (!objects.isTruncated()) {
-        finished = true;
       }
     }
   }
 
-  private OutputStream createOutputStreamOnHdfs(String hdfsPathString) {
-    Configuration conf = new Configuration();
+  private OutputStream createOutputStreamOnHdfs(Configuration conf, String hdfsPathString) {
     OutputStream os = null;
     Path hdfsPath = new Path(hdfsPathString);
     try {
@@ -153,9 +174,15 @@ public class S3DistCp implements Tool {
     return os;
   }
 
-  private void closeOutputStreamOnHdfs(OutputStream os) {
+  private void closeOutputStreamOnHdfs(Configuration conf, OutputStream os) {
     try {
+      InputStream bais;
+      bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
+      IOUtils.copyBytes(bais, os, conf, false);
+      os.flush();
       os.close();
+      count = 0;
+      stringFileList = new StringBuilder();
     } catch (IOException ignore) {
     }
   }
@@ -163,12 +190,11 @@ public class S3DistCp implements Tool {
   private StringBuilder stringFileList = new StringBuilder(1000000);
   private int count = 0;
 
-  private void writeOutputStreamOnHdfs(OutputStream os, String s3filepath, long size) {
+  private void writeOutputStreamOnHdfs(Configuration conf, OutputStream os, String s3filepath, long size) {
     try {
-      stringFileList.append(s3filepath).append("$ SIZE $").append(size).append("¥n");
+      stringFileList.append(s3filepath).append(";").append(size).append('\n');
       count++;
-      if (count >= 100000) {
-        Configuration conf = new Configuration();
+      if (count >= 10000) {
         InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
         IOUtils.copyBytes(bais, os, conf, false);
         count = 0;
@@ -180,10 +206,8 @@ public class S3DistCp implements Tool {
     }
   }
 
-  private BufferedReader getFileListOnHdfs(String hdfsPathString) {
-    final ByteArrayOutputStream os = new ByteArrayOutputStream();
-
-    Configuration conf = new Configuration();
+  private InputStream getFileListOnHdfs(Configuration conf, String hdfsPathString) {
+    //final ByteArrayOutputStream os = new ByteArrayOutputStream();
 
     InputStream is = null;
 
@@ -197,39 +221,38 @@ public class S3DistCp implements Tool {
       return null;
     }
     BufferedReader r = null;
-    try {
-      IOUtils.copyBytes(is, os, conf, false);
+//    try {
+//      IOUtils.copyBytes(is, os, conf, false);
+//
+//      // https://stackoverflow.com/questions/5778658/how-to-convert-outputstream-to-inputstream
+//      PipedInputStream in = new PipedInputStream();
+//      final PipedOutputStream out = new PipedOutputStream(in);
+//      new Thread(new Runnable() {
+//        public void run() {
+//          try {
+//            os.writeTo(out);
+//          } catch (IOException ignore) {
+//          } finally {
+//            if (out != null) {
+//              try {
+//                out.close();
+//              } catch (IOException ignore) {
+//              }
+//            }
+//          }
+//        }
+//      }).start();
+      r = new BufferedReader(new InputStreamReader(is));
 
-      // https://stackoverflow.com/questions/5778658/how-to-convert-outputstream-to-inputstream
-      PipedInputStream in = new PipedInputStream();
-      final PipedOutputStream out = new PipedOutputStream(in);
-      new Thread(new Runnable() {
-        public void run() {
-          try {
-            os.writeTo(out);
-          } catch (IOException ignore) {
-          } finally {
-            if (out != null) {
-              try {
-                out.close();
-              } catch (IOException ignore) {
-              }
-            }
-          }
-        }
-      }).start();
-      r = new BufferedReader(new InputStreamReader(in));
-
-    } catch (IOException e) {
-      e.printStackTrace();
-    } finally {
-      try {
-        is.close();
-      } catch (IOException e) {
-        e.printStackTrace();
-      }
-    }
-    return r;
+    
+//    } finally {
+//      try {
+//        is.close();
+//      } catch (IOException e) {
+//        e.printStackTrace();
+//      }
+//    }
+    return is;
   }
 
   public static AmazonS3Client createAmazonS3Client(Configuration conf) {
