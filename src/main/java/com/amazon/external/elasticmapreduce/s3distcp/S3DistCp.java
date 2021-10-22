@@ -1,21 +1,15 @@
 package com.amazon.external.elasticmapreduce.s3distcp;
 
-import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Scanner;
@@ -61,7 +55,8 @@ public class S3DistCp implements Tool {
   public static final String S3_ENDPOINT_PDT = "s3-us-gov-west-1.amazonaws.com";
   private static String ec2MetaDataAz = null;
   private Configuration configuration;
-
+  private static String FILE_LIST_HDFS_PATH = "hdfs:///filelistspace/list5.txt";
+  private static String SEPARATOR = "$size$";
   public void createInputFileList(Configuration conf, Path srcPath, FileInfoListing fileInfoListing) {
     URI srcUri = srcPath.toUri();
 
@@ -90,15 +85,16 @@ public class S3DistCp implements Tool {
   }
 
   public void createInputFileListS3(Configuration conf, final URI srcUri, FileInfoListing fileInfoListing) {
-    AmazonS3Client s3Client = createAmazonS3Client(conf);
-    ObjectListing objects = null;
-    boolean finished = false;
-    int retryCount = 0;
 
-    InputStream is = getFileListOnHdfs(conf, "hdfs:///filelistspace/list5.txt");
-    
+    final InputStream is = getFileListOnHdfs(conf, FILE_LIST_HDFS_PATH);
+
     if (is == null) {
-      OutputStream os = createOutputStreamOnHdfs(conf, "hdfs:///filelistspace/list5.txt");
+      LOG.info("  --- fileInfoList from s3 ---  ");
+      final OutputStream os = createOutputStreamOnHdfs(conf, FILE_LIST_HDFS_PATH);
+      final AmazonS3Client s3Client = createAmazonS3Client(conf);
+      ObjectListing objects = null;
+      boolean finished = false;
+      int retryCount = 0;
       while (!finished) {
         ListObjectsRequest listObjectRequest = new ListObjectsRequest().withBucketName(srcUri.getHost());
 
@@ -128,7 +124,6 @@ public class S3DistCp implements Tool {
           if (!key.endsWith("/")) {
             StringBuffer sb = new StringBuffer();
             final String s3FilePath = sb.append(srcUri.getScheme()).append("://").append(object.getBucketName()).append("/").append(key).toString();
-            // LOG.debug("About to add " + s3FilePath);
             writeOutputStreamOnHdfs(conf, os, s3FilePath, size);
             fileInfoListing.add(new Path(s3FilePath), size);
           }
@@ -138,14 +133,15 @@ public class S3DistCp implements Tool {
           finished = true;
         }
       }
+      
     } else {
-      LOG.info("  --- else ---  ");
-      String text;
+      LOG.info("  --- fileInfoList from hdfs ---  ");
+      
       try {
         BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+        String text;
         while ((text = reader.readLine()) != null) {
-          //LOG.info(text);
-          String[] pathsize = text.split(";");
+          String[] pathsize = text.split(SEPARATOR);
           fileInfoListing.add(new Path(pathsize[0]), Long.parseLong(pathsize[1]));
         }
       } catch (NumberFormatException e) {
@@ -163,27 +159,23 @@ public class S3DistCp implements Tool {
   }
 
   private OutputStream createOutputStreamOnHdfs(Configuration conf, String hdfsPathString) {
-    OutputStream os = null;
-    Path hdfsPath = new Path(hdfsPathString);
     try {
-      FileSystem fs = hdfsPath.getFileSystem(conf);
-      os = fs.create(hdfsPath);
+      final Path hdfsPath = new Path(hdfsPathString);
+      final FileSystem fs = hdfsPath.getFileSystem(conf);
+      return fs.create(hdfsPath);
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
-    return os;
   }
-
-  private void closeOutputStreamOnHdfs(Configuration conf, OutputStream os) {
+  
+  private InputStream getFileListOnHdfs(Configuration conf, String hdfsPathString) {
     try {
-      InputStream bais;
-      bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
-      IOUtils.copyBytes(bais, os, conf, false);
-      os.flush();
-      os.close();
-      count = 0;
-      stringFileList = new StringBuilder();
-    } catch (IOException ignore) {
+      final Path hdfsPath = new Path(hdfsPathString);
+      final FileSystem fs = hdfsPath.getFileSystem(conf);
+      fs.setVerifyChecksum(true);
+      return fs.open(hdfsPath);
+    } catch (IOException e) {
+      return null;
     }
   }
 
@@ -192,7 +184,7 @@ public class S3DistCp implements Tool {
 
   private void writeOutputStreamOnHdfs(Configuration conf, OutputStream os, String s3filepath, long size) {
     try {
-      stringFileList.append(s3filepath).append(";").append(size).append('\n');
+      stringFileList.append(s3filepath).append(SEPARATOR).append(size).append('\n');
       count++;
       if (count >= 10000) {
         InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
@@ -205,54 +197,17 @@ public class S3DistCp implements Tool {
       throw new RuntimeException(e);
     }
   }
-
-  private InputStream getFileListOnHdfs(Configuration conf, String hdfsPathString) {
-    //final ByteArrayOutputStream os = new ByteArrayOutputStream();
-
-    InputStream is = null;
-
-    Path hdfsPath = new Path(hdfsPathString);
-    FileSystem fs = null;
+  
+  private void closeOutputStreamOnHdfs(Configuration conf, OutputStream os) {
     try {
-      fs = hdfsPath.getFileSystem(conf);
-      fs.setVerifyChecksum(true);
-      is = fs.open(hdfsPath);
-    } catch (IOException e) {
-      return null;
+      InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
+      IOUtils.copyBytes(bais, os, conf, false);
+      os.flush();
+      os.close();
+      count = 0;
+      stringFileList = new StringBuilder();
+    } catch (IOException ignore) {
     }
-    BufferedReader r = null;
-//    try {
-//      IOUtils.copyBytes(is, os, conf, false);
-//
-//      // https://stackoverflow.com/questions/5778658/how-to-convert-outputstream-to-inputstream
-//      PipedInputStream in = new PipedInputStream();
-//      final PipedOutputStream out = new PipedOutputStream(in);
-//      new Thread(new Runnable() {
-//        public void run() {
-//          try {
-//            os.writeTo(out);
-//          } catch (IOException ignore) {
-//          } finally {
-//            if (out != null) {
-//              try {
-//                out.close();
-//              } catch (IOException ignore) {
-//              }
-//            }
-//          }
-//        }
-//      }).start();
-      r = new BufferedReader(new InputStreamReader(is));
-
-    
-//    } finally {
-//      try {
-//        is.close();
-//      } catch (IOException e) {
-//        e.printStackTrace();
-//      }
-//    }
-    return is;
   }
 
   public static AmazonS3Client createAmazonS3Client(Configuration conf) {
