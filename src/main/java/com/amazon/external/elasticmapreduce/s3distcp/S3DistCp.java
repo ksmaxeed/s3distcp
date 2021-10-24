@@ -56,12 +56,16 @@ public class S3DistCp implements Tool {
   private static String ec2MetaDataAz = null;
   private Configuration configuration;
   private static String SEPARATOR = ";;";
+  private static String FILE_LIST_HDFS_PATH = "hdfs:///filelistspace/";
 
   public void createInputFileList(Configuration conf, Path srcPath, FileInfoListing fileInfoListing) {
     final URI srcUri = srcPath.toUri();
 
     if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n"))) {
       String fileListCache = conf.get("s3DistCp.fileListCache", null);
+      if (fileListCache != null) {
+        fileListCache = FILE_LIST_HDFS_PATH + fileListCache;
+      }
       createInputFileListS3(conf, srcUri, fileInfoListing, fileListCache);
 
     } else {
