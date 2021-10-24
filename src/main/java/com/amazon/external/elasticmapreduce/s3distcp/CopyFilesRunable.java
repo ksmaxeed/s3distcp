@@ -222,12 +222,13 @@ class CopyFilesRunable implements Runnable {
 
         for (FileInfo fileInfo : this.fileInfos) {
           this.reducer.markFileAsCommited(fileInfo);
-          if (this.reducer.shouldDeleteOnSuccess()) {
-            LOG.info("Deleting " + fileInfo.inputFileName);
-            Path inPath = new Path(fileInfo.inputFileName.toString());
-            FileSystem deleteFs = FileSystem.get(inPath.toUri(), this.reducer.getConf());
-            deleteFs.delete(inPath, false);
-          }
+          // Disabled delete option
+//          if (this.reducer.shouldDeleteOnSuccess()) {
+//            LOG.info("Deleting " + fileInfo.inputFileName);
+//            Path inPath = new Path(fileInfo.inputFileName.toString());
+//            FileSystem deleteFs = FileSystem.get(inPath.toUri(), this.reducer.getConf());
+//            deleteFs.delete(inPath, false);
+//          }
         }
 
         Path localTempPath = new Path(this.tempPath);
