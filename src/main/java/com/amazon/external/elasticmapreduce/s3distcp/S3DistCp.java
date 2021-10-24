@@ -55,13 +55,14 @@ public class S3DistCp implements Tool {
   public static final String S3_ENDPOINT_PDT = "s3-us-gov-west-1.amazonaws.com";
   private static String ec2MetaDataAz = null;
   private Configuration configuration;
-  private static String FILE_LIST_HDFS_PATH = "hdfs:///filelistspace/list5.txt";
-  private static String SEPARATOR = "$size$";
+  private static String SEPARATOR = ";;";
+
   public void createInputFileList(Configuration conf, Path srcPath, FileInfoListing fileInfoListing) {
-    URI srcUri = srcPath.toUri();
+    final URI srcUri = srcPath.toUri();
 
     if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n"))) {
-      createInputFileListS3(conf, srcUri, fileInfoListing);
+      String fileListCache = conf.get("s3DistCp.fileListCache", null);
+      createInputFileListS3(conf, srcUri, fileInfoListing, fileListCache);
 
     } else {
       try {
@@ -84,13 +85,12 @@ public class S3DistCp implements Tool {
     }
   }
 
-  public void createInputFileListS3(Configuration conf, final URI srcUri, FileInfoListing fileInfoListing) {
+  public void createInputFileListS3(Configuration conf, final URI srcUri, FileInfoListing fileInfoListing, String fileListCache) {
 
-    final InputStream is = getFileListOnHdfs(conf, FILE_LIST_HDFS_PATH);
+    final InputStream is = getFileListOnHdfs(conf, fileListCache);
 
     if (is == null) {
       LOG.info("  --- fileInfoList from s3 ---  ");
-      final OutputStream os = createOutputStreamOnHdfs(conf, FILE_LIST_HDFS_PATH);
       final AmazonS3Client s3Client = createAmazonS3Client(conf);
       ObjectListing objects = null;
       boolean finished = false;
@@ -124,19 +124,19 @@ public class S3DistCp implements Tool {
           if (!key.endsWith("/")) {
             StringBuffer sb = new StringBuffer();
             final String s3FilePath = sb.append(srcUri.getScheme()).append("://").append(object.getBucketName()).append("/").append(key).toString();
-            writeOutputStreamOnHdfs(conf, os, s3FilePath, size);
+            writeOutputStreamOnHdfs(conf, s3FilePath, size, fileListCache);
             fileInfoListing.add(new Path(s3FilePath), size);
           }
         }
-        closeOutputStreamOnHdfs(conf, os);
+        closeOutputStreamOnHdfs(conf, fileListCache);
         if (!objects.isTruncated()) {
           finished = true;
         }
       }
-      
+
     } else {
       LOG.info("  --- fileInfoList from hdfs ---  ");
-      
+
       try {
         BufferedReader reader = new BufferedReader(new InputStreamReader(is));
         String text;
@@ -158,19 +158,28 @@ public class S3DistCp implements Tool {
     }
   }
 
-  private OutputStream createOutputStreamOnHdfs(Configuration conf, String hdfsPathString) {
+  private OutputStream createOutputStreamOnHdfs(Configuration conf, String fileList) {
+    if (fileList == null) {
+      return null;
+    }
     try {
-      final Path hdfsPath = new Path(hdfsPathString);
+      final Path hdfsPath = new Path(fileList);
       final FileSystem fs = hdfsPath.getFileSystem(conf);
+      if (fs.exists(hdfsPath)) {
+        return fs.append(hdfsPath);
+      }
       return fs.create(hdfsPath);
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
   }
-  
-  private InputStream getFileListOnHdfs(Configuration conf, String hdfsPathString) {
+
+  private InputStream getFileListOnHdfs(Configuration conf, String fileList) {
+    if (fileList == null) {
+      return null;
+    }
     try {
-      final Path hdfsPath = new Path(hdfsPathString);
+      final Path hdfsPath = new Path(fileList);
       final FileSystem fs = hdfsPath.getFileSystem(conf);
       fs.setVerifyChecksum(true);
       return fs.open(hdfsPath);
@@ -182,13 +191,17 @@ public class S3DistCp implements Tool {
   private StringBuilder stringFileList = new StringBuilder(1000000);
   private int count = 0;
 
-  private void writeOutputStreamOnHdfs(Configuration conf, OutputStream os, String s3filepath, long size) {
+  private void writeOutputStreamOnHdfs(Configuration conf, String s3filepath, long size, String fileList) {
+    if (fileList == null) {
+      return;
+    }
     try {
       stringFileList.append(s3filepath).append(SEPARATOR).append(size).append('\n');
       count++;
       if (count >= 10000) {
+        OutputStream os = createOutputStreamOnHdfs(conf, fileList);
         InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
-        IOUtils.copyBytes(bais, os, conf, false);
+        IOUtils.copyBytes(bais, os, conf, true);
         count = 0;
         stringFileList = new StringBuilder(1000000);
       }
@@ -197,13 +210,15 @@ public class S3DistCp implements Tool {
       throw new RuntimeException(e);
     }
   }
-  
-  private void closeOutputStreamOnHdfs(Configuration conf, OutputStream os) {
+
+  private void closeOutputStreamOnHdfs(Configuration conf, String fileList) {
+    if (fileList == null) {
+      return;
+    }
     try {
+      OutputStream os = createOutputStreamOnHdfs(conf, fileList);
       InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
-      IOUtils.copyBytes(bais, os, conf, false);
-      os.flush();
-      os.close();
+      IOUtils.copyBytes(bais, os, conf, true);
       count = 0;
       stringFileList = new StringBuilder();
     } catch (IOException ignore) {
@@ -211,9 +226,9 @@ public class S3DistCp implements Tool {
   }
 
   public static AmazonS3Client createAmazonS3Client(Configuration conf) {
-    String accessKeyId = conf.get("fs.s3n.awsAccessKeyId");
-    String SecretAccessKey = conf.get("fs.s3n.awsSecretAccessKey");
-    AmazonS3Client s3Client;
+    final String accessKeyId = conf.get("fs.s3n.awsAccessKeyId");
+    final String SecretAccessKey = conf.get("fs.s3n.awsSecretAccessKey");
+    final AmazonS3Client s3Client;
     if ((accessKeyId != null) && (SecretAccessKey != null)) {
       s3Client = new AmazonS3Client(new BasicAWSCredentials(accessKeyId, SecretAccessKey));
       LOG.info("Created AmazonS3Client with conf KeyId " + accessKeyId);
@@ -344,6 +359,7 @@ public class S3DistCp implements Tool {
     jobConf.setBoolean("s3DistCp.groupWithNewLine", options.getGroupWithNewLine());
     jobConf.setInt("s3DistCp.numberDeletePartition", options.getNumberDeletePartition());
     jobConf.setBoolean("s3DistCp.fileValidation.json", "json".equalsIgnoreCase(options.getFileValidation()));
+    jobConf.set("s3DistCp.fileListCache", options.getFileListCache());
 
     try {
       if ((options.getCopyFromManifest()) && (options.getPreviousManifest() != null)) {
@@ -447,6 +463,7 @@ public class S3DistCp implements Tool {
     boolean groupWithNewLine = false;
     Integer numberDeletePartition = 0;
     String fileValidation = "";
+    String fileListCache;
     Integer targetSize;
     String outputCodec = "keep";
     String s3Endpoint;
@@ -474,6 +491,7 @@ public class S3DistCp implements Tool {
       OptionWithArg groupWithNewLineOption = options.withArg("--groupWithNewLine", "Grouping with new line option");
       OptionWithArg numberDeletePartition = options.withArg("--numberDeletePartition", "Number of delete partitions");
       OptionWithArg fileValidation = options.withArg("--fileValidation", "Validation type to input file");
+      OptionWithArg fileListCache = options.withArg("--fileListCache", "Name of cache file. Create or Use a cache file of s3 filelist on HDFS");
 
       OptionWithArg targetSizeOption = options.withArg("--targetSize", "Target size for output files");
       OptionWithArg outputCodecOption = options.withArg("--outputCodec", "Compression codec for output files");
@@ -525,7 +543,9 @@ public class S3DistCp implements Tool {
       if (fileValidation.defined()) {
         setFileValidation(fileValidation.value);
       }
-
+      if (fileListCache.defined()) {
+        setFileListCache(fileListCache.value);
+      }
       if (targetSizeOption.defined()) {
         setTargetSize(targetSizeOption.value);
       }
@@ -681,6 +701,14 @@ public class S3DistCp implements Tool {
 
     public void setNumberDeletePartition(int a) {
       this.numberDeletePartition = a;
+    }
+
+    public String getFileListCache() {
+      return this.fileListCache;
+    }
+
+    public void setFileListCache(String a) {
+      this.fileListCache = a;
     }
 
     public String getFileValidation() {
