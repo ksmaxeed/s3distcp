@@ -63,7 +63,7 @@ public class S3DistCp implements Tool {
 
     if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n"))) {
       String fileListCache = conf.get("s3DistCp.fileListCache", null);
-      if (fileListCache != null) {
+      if (!fileListCache.isEmpty()) {
         fileListCache = FILE_LIST_HDFS_PATH + fileListCache;
       }
       createInputFileListS3(conf, srcUri, fileInfoListing, fileListCache);
@@ -163,23 +163,34 @@ public class S3DistCp implements Tool {
   }
 
   private OutputStream createOutputStreamOnHdfs(Configuration conf, String fileList) {
-    if (fileList == null) {
+    if (fileList.isEmpty()) {
       return null;
     }
-    try {
-      final Path hdfsPath = new Path(fileList);
-      final FileSystem fs = hdfsPath.getFileSystem(conf);
-      if (fs.exists(hdfsPath)) {
-        return fs.append(hdfsPath);
+    // リリースされてないことがある。10回は繰り返せ。
+    for (int i = 0; i < 10; i++) {
+      try {
+        final Path hdfsPath = new Path(fileList);
+        final FileSystem fs = hdfsPath.getFileSystem(conf);
+        if (fs.exists(hdfsPath)) {
+          return fs.append(hdfsPath);
+        } else {
+          return fs.create(hdfsPath);
+        }
+      } catch (IOException e) {
+        if (i == 9) {
+          throw new RuntimeException(e);
+        }
+        try {
+          Thread.sleep(1000);
+        } catch (InterruptedException ignore) {
+        }
       }
-      return fs.create(hdfsPath);
-    } catch (IOException e) {
-      throw new RuntimeException(e);
     }
+    throw new RuntimeException("");
   }
 
   private InputStream getFileListOnHdfs(Configuration conf, String fileList) {
-    if (fileList == null) {
+    if (fileList.isEmpty()) {
       return null;
     }
     try {
@@ -196,7 +207,7 @@ public class S3DistCp implements Tool {
   private int count = 0;
 
   private void writeOutputStreamOnHdfs(Configuration conf, String s3filepath, long size, String fileList) {
-    if (fileList == null) {
+    if (fileList.isEmpty()) {
       return;
     }
     try {
@@ -216,7 +227,7 @@ public class S3DistCp implements Tool {
   }
 
   private void closeOutputStreamOnHdfs(Configuration conf, String fileList) {
-    if (fileList == null) {
+    if (fileList.isEmpty()) {
       return;
     }
     try {
@@ -467,7 +478,7 @@ public class S3DistCp implements Tool {
     boolean groupWithNewLine = false;
     Integer numberDeletePartition = 0;
     String fileValidation = "";
-    String fileListCache;
+    String fileListCache = "";
     Integer targetSize;
     String outputCodec = "keep";
     String s3Endpoint;
