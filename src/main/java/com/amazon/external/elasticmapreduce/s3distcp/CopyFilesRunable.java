@@ -44,8 +44,8 @@ class CopyFilesRunable implements Runnable {
   private final byte[] newLine = "\n".getBytes(UTF_8);
   private final ObjectMapper objectMapper;
 
-  public CopyFilesRunable(CopyFilesReducer reducer, List<FileInfo> fileInfos, Path tempPath, Path finalPath,
-      boolean groupWithNewLine, boolean jsonFileValidation) {
+  public CopyFilesRunable(CopyFilesReducer reducer, List<FileInfo> fileInfos, Path tempPath, Path finalPath, boolean groupWithNewLine,
+          boolean jsonFileValidation) {
     this.fileInfos = fileInfos;
     this.reducer = reducer;
     this.tempPath = tempPath.toString();
@@ -60,8 +60,7 @@ class CopyFilesRunable implements Runnable {
     LOG.info("Creating CopyFilesRunnable " + tempPath.toString() + ":" + finalPath.toString());
   }
 
-  private long copyStream1(final InputStream inputStream, OutputStream outputStream, MessageDigest md,
-      final boolean isLastFile) throws IOException {
+  private long copyStream1(final InputStream inputStream, OutputStream outputStream, MessageDigest md, final boolean isLastFile) throws IOException {
     long bytesCopied = 0L;
 
     final InputStream inputStreamLocal;
@@ -151,8 +150,7 @@ class CopyFilesRunable implements Runnable {
         return new ProcessedFile(md.digest(), curTempPath);
 
       } catch (IOException e) {
-        LOG.warn("Exception raised while copying file data to:  file=" + this.finalPath + " numRetriesRemaining="
-            + numRetriesRemaining, e);
+        LOG.warn("Exception raised while copying file data to:  file=" + this.finalPath + " numRetriesRemaining=" + numRetriesRemaining, e);
         try {
           FileSystem fs = curTempPath.getFileSystem(this.reducer.getConf());
           fs.delete(curTempPath, false);
@@ -224,12 +222,13 @@ class CopyFilesRunable implements Runnable {
 
         for (FileInfo fileInfo : this.fileInfos) {
           this.reducer.markFileAsCommited(fileInfo);
-          if (this.reducer.shouldDeleteOnSuccess()) {
-            LOG.info("Deleting " + fileInfo.inputFileName);
-            Path inPath = new Path(fileInfo.inputFileName.toString());
-            FileSystem deleteFs = FileSystem.get(inPath.toUri(), this.reducer.getConf());
-            deleteFs.delete(inPath, false);
-          }
+          // Disabled delete option
+//          if (this.reducer.shouldDeleteOnSuccess()) {
+//            LOG.info("Deleting " + fileInfo.inputFileName);
+//            Path inPath = new Path(fileInfo.inputFileName.toString());
+//            FileSystem deleteFs = FileSystem.get(inPath.toUri(), this.reducer.getConf());
+//            deleteFs.delete(inPath, false);
+//          }
         }
 
         Path localTempPath = new Path(this.tempPath);
@@ -261,8 +260,8 @@ class CopyFilesRunable implements Runnable {
     if (this.reducer.shouldUseMutlipartUpload()) {
       int chunkSize = this.reducer.getMultipartSize();
       try (InputStream inStream = this.reducer.openInputStream(curTempPath);
-          OutputStream outStream = new MultipartUploadOutputStream(s3, Utils.createDefaultExecutorService(),
-              this.reducer.getProgressable(), bucket, key, meta, chunkSize, getTempDirs(this.reducer.getConf()))) {
+              OutputStream outStream = new MultipartUploadOutputStream(s3, Utils.createDefaultExecutorService(), this.reducer.getProgressable(), bucket, key,
+                      meta, chunkSize, getTempDirs(this.reducer.getConf()))) {
         MessageDigest md = MessageDigest.getInstance("MD5");
         copyStream2(inStream, outStream, md);
 
@@ -282,8 +281,7 @@ class CopyFilesRunable implements Runnable {
   private void copyToFinalDestination(Path curTempPath) throws IOException {
     LOG.info("Copying " + curTempPath.toString() + " to " + this.finalPath.toString());
 
-    try (InputStream inStream = this.reducer.openInputStream(curTempPath);
-        OutputStream outStream = this.reducer.openOutputStream(this.finalPath)) {
+    try (InputStream inStream = this.reducer.openInputStream(curTempPath); OutputStream outStream = this.reducer.openOutputStream(this.finalPath)) {
       MessageDigest md = MessageDigest.getInstance("MD5");
       copyStream2(inStream, outStream, md);
     } catch (NoSuchAlgorithmException ignore) {
