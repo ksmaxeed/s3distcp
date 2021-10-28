@@ -7,7 +7,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.util.ArrayDeque;
 import java.util.Map;
@@ -63,10 +62,13 @@ public class S3DistCp implements Tool {
 
     if ((srcUri.getScheme().equals("s3")) || (srcUri.getScheme().equals("s3n"))) {
       String fileListCache = conf.get("s3DistCp.fileListCache", null);
+      final Path hdfsPath;
       if (!fileListCache.isEmpty()) {
-        fileListCache = FILE_LIST_HDFS_PATH + fileListCache;
+        hdfsPath = new Path(FILE_LIST_HDFS_PATH + fileListCache);
+      } else {
+        hdfsPath = null;
       }
-      createInputFileListS3(conf, srcUri, fileInfoListing, fileListCache);
+      createInputFileListS3(conf, srcUri, fileInfoListing, hdfsPath);
 
     } else {
       try {
@@ -89,9 +91,8 @@ public class S3DistCp implements Tool {
     }
   }
 
-  public void createInputFileListS3(Configuration conf, final URI srcUri, FileInfoListing fileInfoListing, String fileListCache) {
-
-    final InputStream is = getFileListOnHdfs(conf, fileListCache);
+  public void createInputFileListS3(Configuration conf, final URI srcUri, FileInfoListing fileInfoListing, Path hdfsPath) {
+    final InputStream is = getFileListOnHdfs(conf, hdfsPath);
 
     if (is == null) {
       LOG.info("  --- fileInfoList from s3 ---  ");
@@ -99,6 +100,11 @@ public class S3DistCp implements Tool {
       ObjectListing objects = null;
       boolean finished = false;
       int retryCount = 0;
+
+      StringBuffer fileListSB = new StringBuffer();
+      int requestCount = 0;
+      long fileCount = 0;
+
       while (!finished) {
         ListObjectsRequest listObjectRequest = new ListObjectsRequest().withBucketName(srcUri.getHost());
 
@@ -121,28 +127,45 @@ public class S3DistCp implements Tool {
           LOG.warn("Error listing objects: " + e.getMessage(), e);
           continue;
         }
+        requestCount++;
 
         for (S3ObjectSummary object : objects.getObjectSummaries()) {
           final String key = object.getKey();
           final long size = object.getSize();
-          if (!key.endsWith("/")) {
+
+          if (checkKey(key)) {
             StringBuffer sb = new StringBuffer();
             final String s3FilePath = sb.append(srcUri.getScheme()).append("://").append(object.getBucketName()).append("/").append(key).toString();
-            writeOutputStreamOnHdfs(conf, s3FilePath, size, fileListCache);
+            fileCount++;
             fileInfoListing.add(new Path(s3FilePath), size);
+            s3FilePath.replaceAll("\\p{C}", "");
+            fileListSB.append(s3FilePath).append(SEPARATOR).append(size).append('\n');
+
+          } else {
+            LOG.info("Skip file : " + key);
           }
         }
-        closeOutputStreamOnHdfs(conf, fileListCache);
+
+        if (requestCount % 100 == 0) {
+          LOG.info("file count " + fileCount + ", request count " + requestCount);
+          writeOutputStreamOnHdfs(conf, hdfsPath, fileListSB.toString());
+          fileListSB = new StringBuffer();
+        }
+
         if (!objects.isTruncated()) {
           finished = true;
+          
+          LOG.info("file count " + fileCount + ", request count " + requestCount);
+          writeOutputStreamOnHdfs(conf, hdfsPath, fileListSB.toString());
+          fileListSB = null;
         }
       }
 
     } else {
       LOG.info("  --- fileInfoList from hdfs ---  ");
 
+      BufferedReader reader = new BufferedReader(new InputStreamReader(is));
       try {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(is));
         String text;
         while ((text = reader.readLine()) != null) {
           String[] pathsize = text.split(SEPARATOR);
@@ -154,7 +177,7 @@ public class S3DistCp implements Tool {
         e.printStackTrace();
       } finally {
         try {
-          is.close();
+          reader.close();
         } catch (IOException e) {
           e.printStackTrace();
         }
@@ -162,81 +185,54 @@ public class S3DistCp implements Tool {
     }
   }
 
-  private OutputStream createOutputStreamOnHdfs(Configuration conf, String fileList) {
-    if (fileList.isEmpty()) {
-      return null;
-    }
-    // リリースされてないことがある。10回は繰り返せ。
-    for (int i = 0; i < 10; i++) {
-      try {
-        final Path hdfsPath = new Path(fileList);
-        final FileSystem fs = hdfsPath.getFileSystem(conf);
-        if (fs.exists(hdfsPath)) {
-          return fs.append(hdfsPath);
-        } else {
-          return fs.create(hdfsPath);
-        }
-      } catch (IOException e) {
-        if (i == 9) {
-          throw new RuntimeException(e);
-        }
-        try {
-          Thread.sleep(1000);
-        } catch (InterruptedException ignore) {
-        }
-      }
-    }
-    throw new RuntimeException("");
+  private boolean checkKey(String key) {
+    return !key.endsWith("/") && !key.contains("*") && !key.contains("?") && !key.contains("\"") && !key.contains("<") && !key.contains(">")
+            && !key.contains("\\");
   }
 
-  private InputStream getFileListOnHdfs(Configuration conf, String fileList) {
-    if (fileList.isEmpty()) {
+  private InputStream getFileListOnHdfs(Configuration conf, Path hdfsPath) {
+    if (hdfsPath == null) {
       return null;
     }
+    
     try {
-      final Path hdfsPath = new Path(fileList);
-      final FileSystem fs = hdfsPath.getFileSystem(conf);
-      fs.setVerifyChecksum(true);
-      return fs.open(hdfsPath);
-    } catch (IOException e) {
-      return null;
-    }
-  }
-
-  private StringBuilder stringFileList = new StringBuilder(1000000);
-  private int count = 0;
-
-  private void writeOutputStreamOnHdfs(Configuration conf, String s3filepath, long size, String fileList) {
-    if (fileList.isEmpty()) {
-      return;
-    }
-    try {
-      stringFileList.append(s3filepath).append(SEPARATOR).append(size).append('\n');
-      count++;
-      if (count >= 10000) {
-        OutputStream os = createOutputStreamOnHdfs(conf, fileList);
-        InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
-        IOUtils.copyBytes(bais, os, conf, true);
-        count = 0;
-        stringFileList = new StringBuilder(1000000);
+      final FileSystem fs = FileSystem.get(hdfsPath.toUri(), conf);
+      if (fs.exists(hdfsPath)) {
+        fs.setVerifyChecksum(true);
+        return fs.open(hdfsPath);
+      } else {
+        return null;
       }
-    } catch (UnsupportedEncodingException ignore) {
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
   }
 
-  private void closeOutputStreamOnHdfs(Configuration conf, String fileList) {
-    if (fileList.isEmpty()) {
+  private void writeOutputStreamOnHdfs(Configuration conf, Path hdfsPath, String fileList) {
+    if (hdfsPath == null || fileList.isEmpty()) {
       return;
     }
+
     try {
-      OutputStream os = createOutputStreamOnHdfs(conf, fileList);
-      InputStream bais = new ByteArrayInputStream(stringFileList.toString().getBytes("utf-8"));
+      final FileSystem fs = FileSystem.get(hdfsPath.toUri(), conf);
+      final OutputStream os;
+      if (fs.exists(hdfsPath)) {
+        LOG.info("Append");
+        os = fs.append(hdfsPath);
+      } else {
+        LOG.info("Create");
+        os = fs.create(hdfsPath);
+      }
+      byte[] ba = fileList.getBytes("utf-8");
+
+      InputStream bais = new ByteArrayInputStream(ba);
       IOUtils.copyBytes(bais, os, conf, true);
-      count = 0;
-      stringFileList = new StringBuilder();
-    } catch (IOException ignore) {
+      Thread.sleep(100);
+    } catch (InterruptedException ignore) {
+    } catch (IOException e) {
+      LOG.error(" ------- Error while ------- \n" + fileList);
+      e.printStackTrace();
+      throw new RuntimeException(e);
     }
   }
 
